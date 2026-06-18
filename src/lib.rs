@@ -1,15 +1,19 @@
 #![no_std]
 
-extern crate alloc;
 
-use alloc::vec::Vec;
-use soroban_sdk::{contract, contractimpl, symbol, vec, Address, Env, Symbol, Bytes};
 
-const COUNTER: Symbol = symbol!("COUNTER");
-const TOKEN_OWNER: Symbol = symbol!("TOKEN_OWNER");
-const TOKEN_METADATA: Symbol = symbol!("TOKEN_METADATA");
-const BALANCE: Symbol = symbol!("BALANCE");
-const LOCKED: Symbol = symbol!("LOCKED");
+use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Bytes, symbol_short};
+
+
+const COUNTER: Symbol = symbol_short!("COUNTER");
+const TOKEN_OWNER: Symbol = symbol_short!("TOK_OWN");
+const TOKEN_METADATA: Symbol = symbol_short!("TOK_META");
+const BALANCE: Symbol = symbol_short!("BALANCE");
+const LOCKED: Symbol = symbol_short!("LOCKED");
+
+
+
+
 
 #[contract]
 pub struct CounterContract;
@@ -64,7 +68,7 @@ impl NFTContract {
         let bal: u32 = env.storage().persistent().get(&(BALANCE, &to)).unwrap_or(0);
         env.storage().persistent().set(&(BALANCE, &to), &(bal + 1));
         // Emit Mint event
-        env.events().publish((symbol!("Mint"),), (to, token_id, metadata_hash));
+        env.events().publish((Symbol::new(&env, "Mint"),), (to, token_id, metadata_hash));
     }
 
     // Transfer token, respecting lock flag
@@ -87,7 +91,7 @@ impl NFTContract {
         let to_bal: u32 = env.storage().persistent().get(&(BALANCE, &to)).unwrap_or(0);
         env.storage().persistent().set(&(BALANCE, &to), &(to_bal + 1));
         // Emit Transfer event
-        env.events().publish((symbol!("Transfer"),), (from, to, token_id));
+        env.events().publish((Symbol::new(&env, "Transfer"),), (from, to, token_id));
     }
 
     // Burn a token owned by the caller
@@ -104,7 +108,7 @@ impl NFTContract {
         let bal: u32 = env.storage().persistent().get(&(BALANCE, &owner)).unwrap_or(0);
         env.storage().persistent().set(&(BALANCE, &owner), &(bal - 1));
         // Emit Burn event
-        env.events().publish((symbol!("Burn"),), (owner, token_id));
+        env.events().publish((Symbol::new(&env, "Burn"),), (owner, token_id));
     }
 
     // Return the owner of a token
@@ -115,50 +119,6 @@ impl NFTContract {
     // Return the balance (number of tokens) owned by an address
     pub fn balance_of(env: Env, owner: Address) -> u32 {
         env.storage().persistent().get(&(BALANCE, &owner)).unwrap_or(0)
-    }
-}
-
-mod test;
-
-
-extern crate alloc;
-
-use alloc::vec::Vec;
-use soroban_sdk::{contract, contractimpl, symbol, vec, Address, Env, Symbol};
-
-const COUNTER: Symbol = symbol!("COUNTER");
-
-#[contract]
-pub struct CounterContract;
-
-#[contractimpl]
-impl CounterContract {
-    pub fn increment(env: Env, address: Address) -> i32 {
-        address.require_auth();
-        let mut count: i32 = env
-            .storage()
-            .persistent()
-            .get(&COUNTER)
-            .unwrap_or(0);
-        count += 1;
-        env.storage().persistent().set(&COUNTER, &count);
-        count
-    }
-
-    pub fn decrement(env: Env, address: Address) -> i32 {
-        address.require_auth();
-        let mut count: i32 = env
-            .storage()
-            .persistent()
-            .get(&COUNTER)
-            .unwrap_or(0);
-        count -= 1;
-        env.storage().persistent().set(&COUNTER, &count);
-        count
-    }
-
-    pub fn get_count(env: Env) -> i32 {
-        env.storage().persistent().get(&COUNTER).unwrap_or(0)
     }
 }
 

@@ -1,0 +1,10 @@
+# Build artefacts
+/target/
+Cargo.lock
+
+# Test artefacts
+/tests/
+
+# Optional IDE/editor files
+*.log
+*.tmp
