@@ -1,5 +1,14 @@
-[package]
-name = "renaissance-contract"
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "counter",
+    "betting",
+    "rewards",
+    "player-nft"
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -10,18 +19,14 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = "21.4.0"
 
-[dev-dependencies]
-soroban-sdk = { version = "21.4.0", features = ["testutils"] }
+[workspace.dependencies]
+soroban-sdk = "20.0.0" # Matches standard Soroban stable runtime distributions
+renaissance-core = { path = "./core" }
 
 [profile.release]
-opt-level = "z"
+opt-level = "z"     # Optimize aggressively for smallest binary size (crucial for Soroban)
 overflow-checks = true
 debug = false
-strip = "symbols"
+panic = "abort"
 lto = true
 codegen-units = 1
-panic = "abort"
-
-[profile.release-with-logs]
-inherits = "release"
-debug-assertions = true
