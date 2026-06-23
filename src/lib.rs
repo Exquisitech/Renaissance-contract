@@ -1,125 +1,289 @@
 #![no_std]
 
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
 
+// ── Storage key ──────────────────────────────────────────────────────────────
+// Keyed directly by session_key address → O(1) lookup, no secondary indexes.
 
-use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Bytes, symbol_short};
+#[contracttype]
+pub enum DataKey {
+    Session(Address),
+}
 
+// ── Data structures ───────────────────────────────────────────────────────────
 
-const COUNTER: Symbol = symbol_short!("COUNTER");
-const TOKEN_OWNER: Symbol = symbol_short!("TOK_OWN");
-const TOKEN_METADATA: Symbol = symbol_short!("TOK_META");
-const BALANCE: Symbol = symbol_short!("BALANCE");
-const LOCKED: Symbol = symbol_short!("LOCKED");
+#[contracttype]
+#[derive(Clone)]
+pub struct SessionData {
+    /// Wallet that owns this session.
+    pub user: Address,
+    /// Unix timestamp (seconds) after which the session is no longer valid.
+    pub expires_at: u64,
+    /// Whitelist of actions the session key is permitted to perform.
+    pub allowed_actions: Vec<Symbol>,
+}
 
-
-
-
+// ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
-pub struct CounterContract;
+pub struct SessionContract;
 
 #[contractimpl]
-impl CounterContract {
-    pub fn increment(env: Env, address: Address) -> i32 {
-        address.require_auth();
-        let mut count: i32 = env
-            .storage()
+impl SessionContract {
+    /// Register a new session key with time-bound, action-scoped permissions.
+    ///
+    /// Only the wallet owner (`user`) may call this.
+    /// Session keys cannot exceed the supplied `allowed_actions` whitelist,
+    /// ensuring they can never trigger asset transfers outside platform scope.
+    pub fn create_session(
+        env: Env,
+        user: Address,
+        session_key: Address,
+        expires_at: u64,
+        allowed_actions: Vec<Symbol>,
+    ) {
+        user.require_auth();
+
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            panic!("expires_at must be in the future");
+        }
+
+        let key = DataKey::Session(session_key);
+        let data = SessionData {
+            user,
+            expires_at,
+            allowed_actions,
+        };
+        env.storage().persistent().set(&key, &data);
+
+        // Bump TTL so the entry stays live for at least the session duration.
+        // Stellar produces ~1 ledger every 5 seconds.
+        let session_secs = expires_at.saturating_sub(now);
+        let ledgers_needed = ((session_secs / 5) as u32).max(100);
+        env.storage()
             .persistent()
-            .get(&COUNTER)
-            .unwrap_or(0);
-        count += 1;
-        env.storage().persistent().set(&COUNTER, &count);
-        count
+            .extend_ttl(&key, ledgers_needed, ledgers_needed);
     }
 
-    pub fn decrement(env: Env, address: Address) -> i32 {
-        address.require_auth();
-        let mut count: i32 = env
+    /// Revoke a session key immediately.
+    ///
+    /// Only the wallet owner that created the session may revoke it.
+    /// Silently succeeds if the session does not exist (idempotent).
+    pub fn revoke_session(env: Env, user: Address, session_key: Address) {
+        user.require_auth();
+
+        let key = DataKey::Session(session_key);
+        if let Some(data) = env
             .storage()
             .persistent()
-            .get(&COUNTER)
-            .unwrap_or(0);
-        count -= 1;
-        env.storage().persistent().set(&COUNTER, &count);
-        count
+            .get::<DataKey, SessionData>(&key)
+        {
+            if data.user != user {
+                panic!("Only the session owner can revoke this session");
+            }
+            env.storage().persistent().remove(&key);
+        }
     }
 
-    pub fn get_count(env: Env) -> i32 {
-        env.storage().persistent().get(&COUNTER).unwrap_or(0)
+    /// Check whether `session_key` is currently authorised to perform `action`.
+    ///
+    /// Returns `false` (never panics) when:
+    /// - The session does not exist.
+    /// - The session has expired.
+    /// - `action` is not in the session's `allowed_actions` whitelist.
+    pub fn validate_session(env: Env, session_key: Address, action: Symbol) -> bool {
+        let key = DataKey::Session(session_key);
+        let data: SessionData = match env.storage().persistent().get(&key) {
+            Some(d) => d,
+            None => return false,
+        };
+
+        // Reject expired sessions.
+        if env.ledger().timestamp() >= data.expires_at {
+            return false;
+        }
+
+        // Enforce action-scope whitelist.
+        for allowed in data.allowed_actions.iter() {
+            if allowed == action {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Return session metadata for off-chain inspection.
+    /// Returns `None` if no session exists for the key.
+    pub fn get_session(env: Env, session_key: Address) -> Option<SessionData> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Session(session_key))
     }
 }
 
-#[contract]
-pub struct NFTContract;
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[contractimpl]
-impl NFTContract {
-    // Mint a new token; only callable by authorized admin address
-    pub fn mint(env: Env, admin: Address, to: Address, token_id: u64, metadata_hash: Bytes) {
-        admin.require_auth();
-        // Ensure token does not already exist
-        if env.storage().persistent().has(&(TOKEN_OWNER, token_id)) {
-            panic!("Token already minted");
-        }
-        // Store ownership and metadata
-        env.storage().persistent().set(&(TOKEN_OWNER, token_id), &to);
-        env.storage().persistent().set(&(TOKEN_METADATA, token_id), &metadata_hash);
-        // Update balance
-        let bal: u32 = env.storage().persistent().get(&(BALANCE, &to)).unwrap_or(0);
-        env.storage().persistent().set(&(BALANCE, &to), &(bal + 1));
-        // Emit Mint event
-        env.events().publish((Symbol::new(&env, "Mint"),), (to, token_id, metadata_hash));
+#[cfg(test)]
+mod test {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        vec, Env,
+    };
+
+    fn make_env(timestamp: u64) -> Env {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(timestamp);
+        env
     }
 
-    // Transfer token, respecting lock flag
-    pub fn transfer(env: Env, from: Address, to: Address, token_id: u64) {
-        from.require_auth();
-        let owner: Address = env.storage().persistent().get(&(TOKEN_OWNER, token_id)).expect("Token does not exist");
-        if owner != from {
-            panic!("Caller is not token owner");
-        }
-        // Check lock status
-        let locked: bool = env.storage().persistent().get(&(LOCKED, token_id)).unwrap_or(false);
-        if locked {
-            panic!("Token is locked and cannot be transferred");
-        }
-        // Update ownership
-        env.storage().persistent().set(&(TOKEN_OWNER, token_id), &to);
-        // Update balances
-        let from_bal: u32 = env.storage().persistent().get(&(BALANCE, &from)).unwrap_or(0);
-        env.storage().persistent().set(&(BALANCE, &from), &(from_bal - 1));
-        let to_bal: u32 = env.storage().persistent().get(&(BALANCE, &to)).unwrap_or(0);
-        env.storage().persistent().set(&(BALANCE, &to), &(to_bal + 1));
-        // Emit Transfer event
-        env.events().publish((Symbol::new(&env, "Transfer"),), (from, to, token_id));
+    #[test]
+    fn test_create_and_validate_valid_action() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let expires_at = 1_000_000 + 3_600; // +1 hour
+        let allowed = vec![
+            &env,
+            Symbol::new(&env, "stake"),
+            Symbol::new(&env, "unstake"),
+        ];
+
+        client.create_session(&user, &session_key, &expires_at, &allowed);
+
+        assert!(client.validate_session(&session_key, &Symbol::new(&env, "stake")));
+        assert!(client.validate_session(&session_key, &Symbol::new(&env, "unstake")));
     }
 
-    // Burn a token owned by the caller
-    pub fn burn(env: Env, owner: Address, token_id: u64) {
-        owner.require_auth();
-        let token_owner: Address = env.storage().persistent().get(&(TOKEN_OWNER, token_id)).expect("Token does not exist");
-        if token_owner != owner {
-            panic!("Caller is not token owner");
-        }
-        // Remove token data
-        env.storage().persistent().remove(&(TOKEN_OWNER, token_id));
-        env.storage().persistent().remove(&(TOKEN_METADATA, token_id));
-        // Update balance
-        let bal: u32 = env.storage().persistent().get(&(BALANCE, &owner)).unwrap_or(0);
-        env.storage().persistent().set(&(BALANCE, &owner), &(bal - 1));
-        // Emit Burn event
-        env.events().publish((Symbol::new(&env, "Burn"),), (owner, token_id));
+    #[test]
+    fn test_out_of_scope_action_rejected() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let allowed = vec![&env, Symbol::new(&env, "stake")];
+
+        client.create_session(&user, &session_key, &(1_000_000 + 3_600), &allowed);
+
+        // transfer is NOT in allowed_actions → session key cannot move assets
+        assert!(!client.validate_session(&session_key, &Symbol::new(&env, "transfer")));
+        assert!(!client.validate_session(&session_key, &Symbol::new(&env, "send")));
     }
 
-    // Return the owner of a token
-    pub fn owner_of(env: Env, token_id: u64) -> Address {
-        env.storage().persistent().get(&(TOKEN_OWNER, token_id)).expect("Token does not exist")
+    #[test]
+    fn test_expired_session_auto_rejected() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let allowed = vec![&env, Symbol::new(&env, "stake")];
+
+        client.create_session(&user, &session_key, &(1_000_000 + 3_600), &allowed);
+
+        // Fast-forward ledger past expiry
+        env.ledger().set_timestamp(1_000_000 + 3_601);
+
+        assert!(!client.validate_session(&session_key, &Symbol::new(&env, "stake")));
     }
 
-    // Return the balance (number of tokens) owned by an address
-    pub fn balance_of(env: Env, owner: Address) -> u32 {
-        env.storage().persistent().get(&(BALANCE, &owner)).unwrap_or(0)
+    #[test]
+    fn test_revoke_session() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let allowed = vec![&env, Symbol::new(&env, "stake")];
+
+        client.create_session(&user, &session_key, &(1_000_000 + 3_600), &allowed);
+        assert!(client.validate_session(&session_key, &Symbol::new(&env, "stake")));
+
+        client.revoke_session(&user, &session_key);
+
+        assert!(!client.validate_session(&session_key, &Symbol::new(&env, "stake")));
+    }
+
+    #[test]
+    fn test_revoke_is_idempotent() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+
+        // Revoking a non-existent session should not panic
+        client.revoke_session(&user, &session_key);
+    }
+
+    #[test]
+    fn test_missing_session_returns_false() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let session_key = Address::generate(&env);
+        assert!(!client.validate_session(&session_key, &Symbol::new(&env, "stake")));
+    }
+
+    #[test]
+    fn test_get_session_returns_data() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let expires_at = 1_000_000 + 7_200u64;
+        let allowed = vec![&env, Symbol::new(&env, "vote")];
+
+        client.create_session(&user, &session_key, &expires_at, &allowed);
+
+        let data = client.get_session(&session_key).unwrap();
+        assert_eq!(data.user, user);
+        assert_eq!(data.expires_at, expires_at);
+    }
+
+    #[test]
+    #[should_panic(expected = "expires_at must be in the future")]
+    fn test_cannot_create_already_expired_session() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let user = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let allowed = vec![&env, Symbol::new(&env, "stake")];
+
+        // expires_at in the past → should panic
+        client.create_session(&user, &session_key, &999_999, &allowed);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only the session owner can revoke this session")]
+    fn test_non_owner_cannot_revoke() {
+        let env = make_env(1_000_000);
+        let contract_id = env.register_contract(None, SessionContract);
+        let client = SessionContractClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let session_key = Address::generate(&env);
+        let allowed = vec![&env, Symbol::new(&env, "stake")];
+
+        client.create_session(&owner, &session_key, &(1_000_000 + 3_600), &allowed);
+
+        // attacker tries to revoke owner's session → should panic
+        client.revoke_session(&attacker, &session_key);
     }
 }
-
-mod test;

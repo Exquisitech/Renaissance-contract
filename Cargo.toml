@@ -11,8 +11,13 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = [""]
-license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = "21.4.0"
 
 [workspace.dependencies]
 soroban-sdk = "20.0.0" # Matches standard Soroban stable runtime distributions
