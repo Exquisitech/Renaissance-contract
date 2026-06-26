@@ -1,0 +1,13 @@
+[package]
+name = "renaissance-rewards"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"] # cdylib is required to emit optimized WASM binaries
+
+[dependencies]
+soroban-sdk = { workspace = true }
+renaissance-core = { workspace = true }
