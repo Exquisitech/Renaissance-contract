@@ -10,6 +10,10 @@ pub enum PlatformError {
     InvalidAmount = 3,
     ExpiredDeadline = 4,
     Overflow = 5,
+    /// Caller holds fewer tokens than the requested debit.
+    /// Emitted by `renaissance-betting` `place_bet` to enforce the
+    /// acceptance criterion that bets only settle against real balances.
+    InsufficientBalance = 6,
 }
 
 /// Standardized tracking data configuration for interactive betting matches
