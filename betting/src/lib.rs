@@ -28,7 +28,7 @@
 //! - `claim_payout`   : user pulls parimutuel winnings once the match is settled
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec,
 };
 use renaissance_core::PlatformError;
 
@@ -110,6 +110,12 @@ pub struct Bet {
 #[contracttype]
 pub enum DataKey {
     Admin,
+    Paused,
+    PlatformAdmin,
+    SecurityAdmin,
+    TreasuryAdmin,
+    UpgradeApprovals,
+    WasmHash,
     Match(u64),
     Stats(u64),
     Bet(u64, Address),
@@ -122,6 +128,20 @@ pub struct RenaissanceBettingContract;
 
 #[contractimpl]
 impl RenaissanceBettingContract {
+    fn require_admin(env: &Env) -> Result<Address, PlatformError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)
+    }
+
+    fn ensure_not_paused(env: &Env) -> Result<(), PlatformError> {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Err(PlatformError::Paused);
+        }
+        Ok(())
+    }
+
     // ── Admin / setup ─────────────────────────────────────────────────────────
 
     /// One-time bootstrap of the contract admin. Subsequent calls fail with
@@ -132,9 +152,79 @@ impl RenaissanceBettingContract {
             return Err(PlatformError::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::PlatformAdmin, &admin);
+        env.storage().instance().set(&DataKey::SecurityAdmin, &admin);
+        env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((Symbol::new(&env, "ContractInitialized"),), admin);
         Ok(())
+    }
+
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), PlatformError> {
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformAdmin)
+            .ok_or(PlatformError::Unauthorized)?;
+        let security: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SecurityAdmin)
+            .ok_or(PlatformError::Unauthorized)?;
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TreasuryAdmin)
+            .ok_or(PlatformError::Unauthorized)?;
+        let caller = env.invoker();
+        if caller != platform && caller != security && caller != treasury {
+            return Err(PlatformError::Unauthorized);
+        }
+
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeApprovals)
+            .unwrap_or(Vec::new(&env));
+        if approvals.iter().any(|approved| approved == caller) {
+            return Err(PlatformError::Unauthorized);
+        }
+        approvals.push_back(caller.clone());
+
+        if approvals.len() >= 2 {
+            env.storage().instance().set(&DataKey::WasmHash, &new_wasm_hash);
+            env.deployer().update_current_contract_wasm(&new_wasm_hash);
+            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::new(&env));
+            env.events()
+                .publish((Symbol::new(&env, "Upgraded"),), new_wasm_hash);
+        } else {
+            env.storage().instance().set(&DataKey::UpgradeApprovals, &approvals);
+        }
+        Ok(())
+    }
+
+    pub fn pause(env: Env) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Ok(());
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "Paused"),), admin);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
     }
 
     /// Define a new match id with its authorized oracle, settlement token,
@@ -146,6 +236,7 @@ impl RenaissanceBettingContract {
         token: Address,
         deadline: u64,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         let admin: Address = env
             .storage()
             .instance()
@@ -190,6 +281,7 @@ impl RenaissanceBettingContract {
         match_id: u64,
         new_oracle: Address,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         let admin: Address = env
             .storage()
             .instance()
@@ -228,6 +320,7 @@ impl RenaissanceBettingContract {
         outcome: Outcome,
         amount: i128,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         user.require_auth();
         if amount <= 0 {
             return Err(PlatformError::InvalidAmount);
@@ -298,6 +391,7 @@ impl RenaissanceBettingContract {
         match_id: u64,
         outcome: Outcome,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         oracle.require_auth();
         let mut m: Match = env
             .storage()
@@ -340,6 +434,7 @@ impl RenaissanceBettingContract {
         user: Address,
         match_id: u64,
     ) -> Result<i128, PlatformError> {
+        Self::ensure_not_paused(&env)?;
         user.require_auth();
         let key = DataKey::Bet(match_id, user.clone());
         let mut bet: Bet = env
@@ -421,6 +516,7 @@ impl RenaissanceBettingContract {
         user: Address,
         match_id: u64,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         user.require_auth();
         let key = DataKey::Bet(match_id, user.clone());
         let mut bet: Bet = env
@@ -458,6 +554,9 @@ impl RenaissanceBettingContract {
     /// Look up a user's bet on a match. Returns `None` if the bet does
     /// not exist.
     pub fn get_bet(env: Env, user: Address, match_id: u64) -> Option<Bet> {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return None;
+        }
         env.storage()
             .persistent()
             .get(&DataKey::Bet(match_id, user))
@@ -466,6 +565,9 @@ impl RenaissanceBettingContract {
     /// Look up a match descriptor. Returns `None` if the match id is
     /// not registered.
     pub fn get_match(env: Env, match_id: u64) -> Option<Match> {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return None;
+        }
         env.storage().instance().get(&DataKey::Match(match_id))
     }
 }
@@ -496,6 +598,36 @@ mod test {
         let client = RenaissanceBettingContractClient::new(env, &contract_id);
         client.initialize(admin);
         client
+    }
+
+    #[test]
+    fn test_upgrade_requires_two_governance_approvals_and_preserves_state() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        client.register_match(&20u64, &oracle, &token, &deadline_in(&env, 3_600));
+        let user = Address::generate(&env);
+        mint(&env, &token, &user, 1_000);
+        client.place_bet(&user, &20u64, &Outcome::HomeWin, &100i128);
+
+        let approver_a = Address::generate(&env);
+        let approver_b = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&DataKey::PlatformAdmin, &approver_a);
+            env.storage().instance().set(&DataKey::SecurityAdmin, &approver_b);
+            env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+        });
+
+        let new_hash = BytesN::from_array(&env, &[9; 32]);
+        client.upgrade(&new_hash).unwrap();
+        let res = client.try_upgrade(&new_hash);
+        assert!(res.is_err());
+
+        let match_data = client.get_match(&20u64).unwrap();
+        assert_eq!(match_data.match_id, 20u64);
+        assert_eq!(match_data.oracle, oracle);
     }
 
     fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {

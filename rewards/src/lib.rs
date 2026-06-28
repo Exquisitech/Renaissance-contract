@@ -13,7 +13,7 @@
 //!   `transfer_points` calls.
 
 use renaissance_core::{get_event_topic_by_string, PlatformError};
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol};
 
 // ── TTL ──────────────────────────────────────────────────────────────────────
 // Stellar produces ~1 ledger every 5 seconds. 30 days ≈ 518_400 ledgers.
@@ -26,6 +26,12 @@ const MAX_BALANCE_TTL: u32 = 30 * DAY_IN_LEDGERS; // 30 days
 pub enum DataKey {
     /// Stored in instance storage. The platform address authorised to award points.
     Admin,
+    Paused,
+    PlatformAdmin,
+    SecurityAdmin,
+    TreasuryAdmin,
+    UpgradeApprovals,
+    WasmHash,
     /// Stored in persistent storage. One entry per user address.
     Balance(Address),
 }
@@ -41,6 +47,20 @@ pub struct FanRewardsContract;
 
 #[contractimpl]
 impl FanRewardsContract {
+    fn require_admin(env: &Env) -> Result<Address, PlatformError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)
+    }
+
+    fn ensure_not_paused(env: &Env) -> Result<(), PlatformError> {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Err(PlatformError::Paused);
+        }
+        Ok(())
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
     /// One-time initialisation: designate the platform admin that will be the
@@ -55,12 +75,82 @@ impl FanRewardsContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::PlatformAdmin, &admin);
+        env.storage().instance().set(&DataKey::SecurityAdmin, &admin);
+        env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+        env.storage().instance().set(&DataKey::Paused, &false);
         // Re-bump instance storage TTL so config survives long inactivity.
         env.storage()
             .instance()
             .extend_ttl(MAX_BALANCE_TTL, MAX_BALANCE_TTL);
 
         Ok(())
+    }
+
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), PlatformError> {
+        let platform: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformAdmin)
+            .ok_or(PlatformError::Unauthorized)?;
+        let security: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::SecurityAdmin)
+            .ok_or(PlatformError::Unauthorized)?;
+        let treasury: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::TreasuryAdmin)
+            .ok_or(PlatformError::Unauthorized)?;
+        let caller = env.invoker();
+        if caller != platform && caller != security && caller != treasury {
+            return Err(PlatformError::Unauthorized);
+        }
+
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeApprovals)
+            .unwrap_or(Vec::new(&env));
+        if approvals.iter().any(|approved| approved == caller) {
+            return Err(PlatformError::Unauthorized);
+        }
+        approvals.push_back(caller.clone());
+
+        if approvals.len() >= 2 {
+            env.storage().instance().set(&DataKey::WasmHash, &new_wasm_hash);
+            env.deployer().update_current_contract_wasm(&new_wasm_hash);
+            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::new(&env));
+            env.events()
+                .publish((Symbol::new(&env, "Upgraded"),), new_wasm_hash);
+        } else {
+            env.storage().instance().set(&DataKey::UpgradeApprovals, &approvals);
+        }
+        Ok(())
+    }
+
+    pub fn pause(env: Env) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Ok(());
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "Paused"),), admin);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
     }
 
     /// Return the currently configured platform admin, if any.
@@ -81,6 +171,7 @@ impl FanRewardsContract {
         amount: i128,
         reason: Symbol,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         // Reject if admin has not been configured yet.
         let admin: Address = env
             .storage()
@@ -128,6 +219,7 @@ impl FanRewardsContract {
         cost: i128,
         reward_id: Symbol,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         user.require_auth();
 
         if cost <= 0 {
@@ -171,6 +263,7 @@ impl FanRewardsContract {
         to: Address,
         amount: i128,
     ) -> Result<(), PlatformError> {
+        Self::ensure_not_paused(&env)?;
         from.require_auth();
 
         if amount <= 0 {
@@ -247,6 +340,24 @@ mod test {
         client.initialize(&admin).unwrap();
 
         (env, admin, contract_id)
+    }
+
+    #[test]
+    fn test_upgrade_requires_two_governance_approvals() {
+        let (env, admin, contract_id) = setup();
+        let c = client(&env, &contract_id);
+        let approver_a = Address::generate(&env);
+        let approver_b = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&DataKey::PlatformAdmin, &approver_a);
+            env.storage().instance().set(&DataKey::SecurityAdmin, &approver_b);
+            env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+        });
+
+        let new_hash = BytesN::from_array(&env, &[7; 32]);
+        c.upgrade(&new_hash).unwrap();
+        let res = c.try_upgrade(&new_hash);
+        assert!(res.is_err());
     }
 
     fn client(env: &Env, contract_id: &Address) -> FanRewardsContractClient {

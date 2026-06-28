@@ -14,6 +14,7 @@ pub enum PlatformError {
     /// Emitted by `renaissance-betting` `place_bet` to enforce the
     /// acceptance criterion that bets only settle against real balances.
     InsufficientBalance = 6,
+    Paused = 7,
 }
 
 /// Standardized tracking data configuration for interactive betting matches
