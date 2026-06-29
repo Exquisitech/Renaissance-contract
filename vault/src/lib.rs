@@ -389,3 +389,6 @@ impl RenaissanceVaultContract {
         env.storage().persistent().has(&DataKey::LockedBet(match_id, user, asset))
     }
 }
+
+#[cfg(test)]
+mod test;
