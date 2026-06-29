@@ -7,7 +7,6 @@ members = [
     "rewards",
     "player-nft"
 ]
-# Adding a comment to test write access
 
 [workspace.package]
 version = "0.1.0"
