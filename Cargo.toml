@@ -5,7 +5,9 @@ members = [
     "counter",
     "betting",
     "rewards",
-    "player-nft"
+    "player-nft",
+    "oracle",
+    "vault"
 ]
 
 [workspace.package]
