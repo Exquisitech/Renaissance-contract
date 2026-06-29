@@ -214,3 +214,151 @@ fn test_payout_success() {
     assert_eq!(user_balance.locked, 0);
     assert!(!vault_client.is_locked_for_bet(&123, &winner, &token_contract.get_address()));
 }
+
+#[test]
+fn test_emergency_withdraw_schedule_and_execute() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let betting_contract = Address::generate(&env);
+    
+    let token_contract = env.register_stellar_asset_contract(admin.clone());
+    let vault_id = env.register_contract(None, RenaissanceVaultContract);
+    let vault_client = RenaissanceVaultContractClient::new(&env, &vault_id);
+    
+    vault_client.initialize(&admin, &betting_contract);
+    
+    let to = Address::generate(&env);
+    let token_client = Client::new(&env, &token_contract.get_address());
+    
+    // Simulate some tokens stuck in the contract
+    token_client.mint(&vault_id, &1000);
+    
+    // Schedule emergency withdraw
+    admin.require_auth();
+    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    
+    // Fast forward past 24 hours
+    env.ledger().set_timestamp(24 * 60 * 60 + 1);
+    
+    // Execute
+    admin.require_auth();
+    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    
+    assert_eq!(token_client.balance(&to), 500);
+}
+
+#[test]
+fn test_emergency_withdraw_cancel() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let betting_contract = Address::generate(&env);
+    
+    let token_contract = env.register_stellar_asset_contract(admin.clone());
+    let vault_id = env.register_contract(None, RenaissanceVaultContract);
+    let vault_client = RenaissanceVaultContractClient::new(&env, &vault_id);
+    
+    vault_client.initialize(&admin, &betting_contract);
+    let to = Address::generate(&env);
+    
+    admin.require_auth();
+    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    
+    // Cancel
+    admin.require_auth();
+    vault_client.cancel_emergency_withdraw(&token_contract.get_address());
+    
+    // Fast forward
+    env.ledger().set_timestamp(24 * 60 * 60 + 1);
+    
+    // Execute should fail because it was cancelled
+    // It will try to schedule again, so let's just make sure it doesn't transfer
+    let token_client = Client::new(&env, &token_contract.get_address());
+    token_client.mint(&vault_id, &1000);
+    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    assert_eq!(token_client.balance(&to), 0); // Not transferred, just scheduled again
+}
+
+#[test]
+fn test_set_admin_schedule_and_execute() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let betting_contract = Address::generate(&env);
+    
+    let vault_id = env.register_contract(None, RenaissanceVaultContract);
+    let vault_client = RenaissanceVaultContractClient::new(&env, &vault_id);
+    vault_client.initialize(&admin, &betting_contract);
+    
+    let new_admin = Address::generate(&env);
+    
+    // Schedule
+    admin.require_auth();
+    vault_client.set_admin(&new_admin);
+    
+    // Fast forward past 48 hours
+    env.ledger().set_timestamp(48 * 60 * 60 + 1);
+    
+    // Execute
+    admin.require_auth();
+    vault_client.set_admin(&new_admin);
+    
+    // To verify admin changed, we could call an admin function
+    new_admin.require_auth();
+    vault_client.cancel_set_admin(); // Should succeed with new admin
+}
+
+#[test]
+fn test_set_admin_cancel() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let betting_contract = Address::generate(&env);
+    
+    let vault_id = env.register_contract(None, RenaissanceVaultContract);
+    let vault_client = RenaissanceVaultContractClient::new(&env, &vault_id);
+    vault_client.initialize(&admin, &betting_contract);
+    
+    let new_admin = Address::generate(&env);
+    
+    // Schedule
+    admin.require_auth();
+    vault_client.set_admin(&new_admin);
+    
+    // Cancel
+    admin.require_auth();
+    vault_client.cancel_set_admin();
+}
+
+#[test]
+fn test_recover_token() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let betting_contract = Address::generate(&env);
+    
+    let vault_id = env.register_contract(None, RenaissanceVaultContract);
+    let vault_client = RenaissanceVaultContractClient::new(&env, &vault_id);
+    vault_client.initialize(&admin, &betting_contract);
+    
+    // Tracked token
+    let tracked_token = env.register_stellar_asset_contract(admin.clone());
+    let user = Address::generate(&env);
+    let token_client = Client::new(&env, &tracked_token.get_address());
+    token_client.mint(&user, &1000);
+    
+    user.require_auth();
+    vault_client.deposit(&user, &500, &tracked_token.get_address());
+    
+    // Recover should fail for tracked token
+    let to = Address::generate(&env);
+    admin.require_auth();
+    let result = vault_client.try_recover_token(&tracked_token.get_address(), &to, &100);
+    assert!(result.is_err());
+    
+    // Untracked token
+    let untracked_token = env.register_stellar_asset_contract(admin.clone());
+    let untracked_client = Client::new(&env, &untracked_token.get_address());
+    untracked_client.mint(&vault_id, &500); // Send directly to contract
+    
+    // Recover should succeed
+    admin.require_auth();
+    vault_client.recover_token(&untracked_token.get_address(), &to, &500);
+    assert_eq!(untracked_client.balance(&to), 500);
+}
