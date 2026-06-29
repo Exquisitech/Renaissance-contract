@@ -312,3 +312,6 @@ impl FootballOracleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 }
+
+#[cfg(test)]
+mod test;
