@@ -45,6 +45,10 @@ pub enum DataKey {
     VaultBalance(Address),
     /// Locked funds for a specific match: (match_id, user, asset) -> amount
     LockedBet(u64, Address, Address),
+    /// Pending withdrawal for an asset
+    PendingWithdrawal(Address),
+    /// Pending admin transfer
+    PendingAdmin,
 }
 
 // ── Custom errors ───────────────────────────────────────────────────────────────
@@ -62,6 +66,27 @@ pub enum VaultError {
     InvalidAmount = 203,
     /// Bet lock not found
     BetLockNotFound = 204,
+    /// Timelock not expired yet
+    TimelockNotExpired = 205,
+    /// Token is tracked and cannot be recovered
+    TokenIsTracked = 206,
+    /// Mismatch in pending data
+    MismatchPendingData = 207,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingWithdrawal {
+    pub to: Address,
+    pub amount: i128,
+    pub pending_until: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminData {
+    pub new_admin: Address,
+    pub pending_until: u64,
 }
 
 // ── Contract Implementation ─────────────────────────────────────────────────────
@@ -387,6 +412,111 @@ impl RenaissanceVaultContract {
     /// Check if funds are locked for a specific bet
     pub fn is_locked_for_bet(env: Env, match_id: u64, user: Address, asset: Address) -> bool {
         env.storage().persistent().has(&DataKey::LockedBet(match_id, user, asset))
+    }
+
+    /// Emergency withdraw of an asset (timelocked)
+    pub fn emergency_withdraw(env: Env, asset: Address, to: Address, amount: i128) -> Result<(), VaultError> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let key = DataKey::PendingWithdrawal(asset.clone());
+        if let Some(pending) = env.storage().instance().get::<_, PendingWithdrawal>(&key) {
+            if pending.to != to || pending.amount != amount {
+                return Err(VaultError::MismatchPendingData);
+            }
+            if env.ledger().timestamp() < pending.pending_until {
+                return Err(VaultError::TimelockNotExpired);
+            }
+
+            let client = token::Client::new(&env, &asset);
+            client.transfer(&env.current_contract_address(), &to, &amount);
+            env.storage().instance().remove(&key);
+
+            let reason_hash = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
+            env.events().publish(
+                (get_event_topic_by_string(&env, "EmergencyAction"),),
+                (Symbol::new(&env, "emergency_withdraw"), asset, to, amount, reason_hash),
+            );
+            Ok(())
+        } else {
+            env.storage().instance().set(&key, &PendingWithdrawal {
+                to: to.clone(),
+                amount,
+                pending_until: env.ledger().timestamp() + 24 * 60 * 60, // 24 hours
+            });
+            Ok(())
+        }
+    }
+
+    /// Cancel a pending emergency withdrawal
+    pub fn cancel_emergency_withdraw(env: Env, asset: Address) -> Result<(), VaultError> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingWithdrawal(asset));
+        Ok(())
+    }
+
+    /// Recover accidentally sent tokens (only for non-tracked tokens)
+    pub fn recover_token(env: Env, asset: Address, to: Address, amount: i128) -> Result<(), VaultError> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let vault_balance_key = DataKey::VaultBalance(asset.clone());
+        if let Some(vault_balance) = env.storage().persistent().get::<_, VaultBalance>(&vault_balance_key) {
+            if vault_balance.total_deposited > 0 || vault_balance.total_locked > 0 {
+                return Err(VaultError::TokenIsTracked);
+            }
+        }
+
+        let client = token::Client::new(&env, &asset);
+        client.transfer(&env.current_contract_address(), &to, &amount);
+
+        let reason_hash = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
+        env.events().publish(
+            (get_event_topic_by_string(&env, "EmergencyAction"),),
+            (Symbol::new(&env, "recover_token"), asset, to, amount, reason_hash),
+        );
+        Ok(())
+    }
+
+    /// Transfer admin rights (timelocked)
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), VaultError> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        let key = DataKey::PendingAdmin;
+        if let Some(pending) = env.storage().instance().get::<_, PendingAdminData>(&key) {
+            if pending.new_admin != new_admin {
+                return Err(VaultError::MismatchPendingData);
+            }
+            if env.ledger().timestamp() < pending.pending_until {
+                return Err(VaultError::TimelockNotExpired);
+            }
+
+            env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&key);
+
+            let reason_hash = soroban_sdk::BytesN::from_array(&env, &[0; 32]);
+            env.events().publish(
+                (get_event_topic_by_string(&env, "EmergencyAction"),),
+                (Symbol::new(&env, "set_admin"), new_admin, reason_hash),
+            );
+            Ok(())
+        } else {
+            env.storage().instance().set(&key, &PendingAdminData {
+                new_admin: new_admin.clone(),
+                pending_until: env.ledger().timestamp() + 48 * 60 * 60, // 48 hours
+            });
+            Ok(())
+        }
+    }
+
+    /// Cancel a pending admin transfer
+    pub fn cancel_set_admin(env: Env) -> Result<(), VaultError> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
     }
 }
 
