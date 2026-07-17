@@ -75,7 +75,7 @@ pub struct Match {
     /// Set to `true` by the oracle in `settle_bet`.
     pub settled: bool,
     /// Final outcome — populated by `settle_bet`.
-    pub outcome: Option<Outcome>,
+    pub outcome: Option<u32>,
 }
 
 /// Aggregated match statistics used by `claim_payout` to compute payouts
@@ -198,7 +198,7 @@ impl RenaissanceBettingContract {
         if approvals.len() >= 2 {
             env.storage().instance().set(&DataKey::WasmHash, &new_wasm_hash);
             env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
-            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::new(&env));
+            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::<Address>::new(&env));
             env.events()
                 .publish((Symbol::new(&env, "Upgraded"),), new_wasm_hash);
         } else {
@@ -409,7 +409,7 @@ impl RenaissanceBettingContract {
         }
 
         m.settled = true;
-        m.outcome = Some(outcome);
+        m.outcome = Some(outcome.index());
         env.storage().instance().set(&DataKey::Match(match_id), &m);
 
         env.events().publish(
@@ -457,7 +457,7 @@ impl RenaissanceBettingContract {
             return Err(PlatformError::ExpiredDeadline);
         }
         let winning_outcome = m.outcome.ok_or(PlatformError::InternalError)?;
-        if bet.outcome != winning_outcome {
+        if bet.outcome.index() != winning_outcome {
             return Err(PlatformError::InternalError);
         }
 

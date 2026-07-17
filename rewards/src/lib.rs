@@ -121,7 +121,7 @@ impl FanRewardsContract {
         if approvals.len() >= 2 {
             env.storage().instance().set(&DataKey::WasmHash, &new_wasm_hash);
             env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
-            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::new(&env));
+            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::<Address>::new(&env));
             env.events()
                 .publish((Symbol::new(&env, "Upgraded"),), new_wasm_hash);
         } else {
