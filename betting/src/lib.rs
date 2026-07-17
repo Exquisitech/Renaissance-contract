@@ -466,7 +466,7 @@ impl RenaissanceBettingContract {
             .instance()
             .get(&DataKey::Stats(match_id))
             .ok_or(PlatformError::InternalError)?;
-        let winning_pool = stats.pools.get(winning_outcome.index()).unwrap_or(0);
+        let winning_pool = stats.pools.get(winning_outcome).unwrap_or(0);
         let total_pool = stats
             .pools
             .get(0)
