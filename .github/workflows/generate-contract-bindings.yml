@@ -24,6 +24,8 @@ jobs:
           stellar --version
       - name: Generate clients
         run: npm run generate:contracts
+      - name: Verify generated clients are current
+        run: git diff --exit-code -- packages/soroban-clients/src
       - uses: actions/upload-artifact@v4
         with:
           name: soroban-clients
