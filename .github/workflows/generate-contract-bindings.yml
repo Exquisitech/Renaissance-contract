@@ -24,9 +24,9 @@ jobs:
           stellar --version
       - name: Generate clients
         run: npm run generate:contracts
-      - name: Type-check clients
-        run: npm run typecheck:contracts
       - uses: actions/upload-artifact@v4
         with:
           name: soroban-clients
           path: packages/soroban-clients/src
+      - name: Type-check clients
+        run: npm run typecheck:contracts
