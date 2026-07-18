@@ -18,6 +18,23 @@
 //! - `get_bet`  : fetch a single bet by (user, match_id)
 //! - `get_match`: fetch a registered match descriptor
 //!
+//! ## Storage / gas notes
+//! `Bet` records (and therefore `get_bet`) stay in **persistent** storage
+//! rather than the cheaper `temporary` storage class: a `Bet` holds real
+//! transferred funds (`amount`), a `claimed` flag gating a second
+//! withdrawal, and the paid-out `payout`. If a temporary entry's TTL lapsed
+//! before a bettor called `claim_payout` or `refund_bet`, the record would
+//! vanish and their funds would become unrecoverable. That risk makes
+//! `temporary` storage unsafe here, unlike e.g. `renaissance-counter`'s
+//! demo `COUNTER`, which has no value at stake. See `docs/gas-benchmarks.md`.
+//!
+//! `MatchStats` no longer tracks a `bettors: Vec<Address>` list: it was
+//! purely informational (never read by `claim_payout` or anything else) but
+//! was appended to and rewritten in full on every single `place_bet` call,
+//! making `place_bet`'s storage cost grow linearly with the number of
+//! bettors on a match. Removing it turns that per-call cost back into a
+//! constant.
+//!
 //! Write API:
 //! - `initialize`     : one-time admin bootstrap
 //! - `register_match` : admin defines match id + authorized oracle + token + deadline
@@ -87,9 +104,6 @@ pub struct MatchStats {
     /// Per-outcome pool totals indexed by `Outcome::index()`:
     /// 0 = HomeWin, 1 = Draw, 2 = AwayWin.
     pub pools: Vec<i128>,
-    /// All bettors on this match — purely informational; payouts
-    /// are resolved lazily per-bettor in `claim_payout`.
-    pub bettors: Vec<Address>,
 }
 
 /// A single user's bet on a single match.
@@ -267,7 +281,6 @@ impl RenaissanceBettingContract {
         let stats = MatchStats {
             match_id,
             pools: Vec::from_array(&env, [0i128, 0, 0]),
-            bettors: Vec::new(&env),
         };
         env.storage()
             .instance()
@@ -373,7 +386,6 @@ impl RenaissanceBettingContract {
         stats
             .pools
             .set(idx, prev.checked_add(amount).ok_or(PlatformError::Overflow)?);
-        stats.bettors.push_back(user.clone());
         env.storage()
             .instance()
             .set(&DataKey::Stats(match_id), &stats);
@@ -555,7 +567,9 @@ impl RenaissanceBettingContract {
     }
 
     /// Look up a user's bet on a match. Returns `None` if the bet does
-    /// not exist.
+    /// not exist. Reads from persistent storage rather than temporary
+    /// storage — see the "Storage / gas notes" section of this module's
+    /// doc comment for why that's the safe choice for fund-bearing state.
     pub fn get_bet(env: Env, user: Address, match_id: u64) -> Option<Bet> {
         if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
             return None;
@@ -596,7 +610,7 @@ mod test {
         (env, admin, oracle, token)
     }
 
-    fn initialize(env: &Env, admin: &Address) -> RenaissanceBettingContractClient<'_> {
+    fn initialize<'a>(env: &'a Env, admin: &'a Address) -> RenaissanceBettingContractClient<'a> {
         let contract_id = env.register_contract(None, RenaissanceBettingContract);
         let client = RenaissanceBettingContractClient::new(env, &contract_id);
         client.initialize(admin);
@@ -624,8 +638,8 @@ mod test {
         });
 
         let new_hash = BytesN::from_array(&env, &[9; 32]);
-        client.upgrade(&new_hash).unwrap();
-        let res = client.try_upgrade(&new_hash);
+        client.upgrade(&approver_a, &new_hash);
+        let res = client.try_upgrade(&approver_a, &new_hash);
         assert!(res.is_err());
 
         let match_data = client.get_match(&20u64).unwrap();
@@ -1073,5 +1087,175 @@ mod test {
         client.register_match(&100u64, &oracle, &token, &deadline_in(&env, 100));
         let m = client.get_match(&100).unwrap();
         assert_eq!(m.match_id, 100);
+    }
+}
+
+// ── Gas benchmarks ───────────────────────────────────────────────────────────
+//
+// Measures CPU instructions and memory bytes charged by the Soroban host for
+// the contract's core financial-path functions, and fails the test (and
+// therefore CI, via `cargo test --release`) if a function exceeds its
+// budget. Admin/setup functions (`initialize`, `pause`, `set_oracle`, ...)
+// are intentionally out of scope: they run at most once or twice per match
+// and aren't on the per-bettor hot path this benchmark is meant to guard.
+// See `docs/gas-benchmarks.md` for the last recorded numbers.
+#[cfg(test)]
+mod gas_bench {
+    use super::*;
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient,
+    };
+
+    const PLACE_BET_CPU_BUDGET: u64 = 3_000_000;
+    const PLACE_BET_MEM_BUDGET: u64 = 300_000;
+    const SETTLE_BET_CPU_BUDGET: u64 = 1_500_000;
+    const SETTLE_BET_MEM_BUDGET: u64 = 150_000;
+    const CLAIM_PAYOUT_CPU_BUDGET: u64 = 3_000_000;
+    const CLAIM_PAYOUT_MEM_BUDGET: u64 = 300_000;
+    const REFUND_BET_CPU_BUDGET: u64 = 3_000_000;
+    const REFUND_BET_MEM_BUDGET: u64 = 300_000;
+    const GET_BET_CPU_BUDGET: u64 = 500_000;
+    const GET_BET_MEM_BUDGET: u64 = 60_000;
+    const GET_MATCH_CPU_BUDGET: u64 = 500_000;
+    const GET_MATCH_MEM_BUDGET: u64 = 60_000;
+
+    fn measure<F: FnOnce()>(env: &Env, f: F) -> (u64, u64) {
+        env.budget().reset_unlimited();
+        f();
+        (
+            env.budget().cpu_instruction_cost(),
+            env.budget().memory_bytes_cost(),
+        )
+    }
+
+    fn setup() -> (Env, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000_000);
+        let admin = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let token = env.register_stellar_asset_contract(admin.clone());
+        (env, admin, oracle, token)
+    }
+
+    fn mint(env: &Env, token: &Address, to: &Address, amount: i128) {
+        StellarAssetClient::new(env, token).mint(to, &amount);
+    }
+
+    #[test]
+    fn bench_place_bet_stays_within_budget() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        client.register_match(&1u64, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+
+        let user = Address::generate(&env);
+        mint(&env, &token, &user, 1_000);
+
+        let (cpu, mem) = measure(&env, || {
+            client.place_bet(&user, &1u64, &Outcome::HomeWin, &100i128);
+        });
+
+        assert!(cpu <= PLACE_BET_CPU_BUDGET, "place_bet cpu {cpu} exceeded budget {PLACE_BET_CPU_BUDGET}");
+        assert!(mem <= PLACE_BET_MEM_BUDGET, "place_bet mem {mem} exceeded budget {PLACE_BET_MEM_BUDGET}");
+    }
+
+    #[test]
+    fn bench_settle_bet_stays_within_budget() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        client.register_match(&2u64, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+        let user = Address::generate(&env);
+        mint(&env, &token, &user, 1_000);
+        client.place_bet(&user, &2u64, &Outcome::HomeWin, &100i128);
+
+        let (cpu, mem) = measure(&env, || {
+            client.settle_bet(&oracle, &2u64, &Outcome::HomeWin);
+        });
+
+        assert!(cpu <= SETTLE_BET_CPU_BUDGET, "settle_bet cpu {cpu} exceeded budget {SETTLE_BET_CPU_BUDGET}");
+        assert!(mem <= SETTLE_BET_MEM_BUDGET, "settle_bet mem {mem} exceeded budget {SETTLE_BET_MEM_BUDGET}");
+    }
+
+    #[test]
+    fn bench_claim_payout_stays_within_budget() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        client.register_match(&3u64, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+        let winner = Address::generate(&env);
+        let loser = Address::generate(&env);
+        mint(&env, &token, &winner, 1_000);
+        mint(&env, &token, &loser, 1_000);
+        client.place_bet(&winner, &3u64, &Outcome::HomeWin, &100i128);
+        client.place_bet(&loser, &3u64, &Outcome::Draw, &100i128);
+        client.settle_bet(&oracle, &3u64, &Outcome::HomeWin);
+
+        let (cpu, mem) = measure(&env, || {
+            client.claim_payout(&winner, &3u64);
+        });
+
+        assert!(cpu <= CLAIM_PAYOUT_CPU_BUDGET, "claim_payout cpu {cpu} exceeded budget {CLAIM_PAYOUT_CPU_BUDGET}");
+        assert!(mem <= CLAIM_PAYOUT_MEM_BUDGET, "claim_payout mem {mem} exceeded budget {CLAIM_PAYOUT_MEM_BUDGET}");
+    }
+
+    #[test]
+    fn bench_refund_bet_stays_within_budget() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        client.register_match(&4u64, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+        let user = Address::generate(&env);
+        mint(&env, &token, &user, 1_000);
+        client.place_bet(&user, &4u64, &Outcome::HomeWin, &100i128);
+        env.ledger().set_timestamp(env.ledger().timestamp() + 3_601);
+
+        let (cpu, mem) = measure(&env, || {
+            client.refund_bet(&user, &4u64);
+        });
+
+        assert!(cpu <= REFUND_BET_CPU_BUDGET, "refund_bet cpu {cpu} exceeded budget {REFUND_BET_CPU_BUDGET}");
+        assert!(mem <= REFUND_BET_MEM_BUDGET, "refund_bet mem {mem} exceeded budget {REFUND_BET_MEM_BUDGET}");
+    }
+
+    #[test]
+    fn bench_get_bet_stays_within_budget() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        client.register_match(&5u64, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+        let user = Address::generate(&env);
+        mint(&env, &token, &user, 1_000);
+        client.place_bet(&user, &5u64, &Outcome::HomeWin, &100i128);
+
+        let (cpu, mem) = measure(&env, || {
+            client.get_bet(&user, &5u64);
+        });
+
+        assert!(cpu <= GET_BET_CPU_BUDGET, "get_bet cpu {cpu} exceeded budget {GET_BET_CPU_BUDGET}");
+        assert!(mem <= GET_BET_MEM_BUDGET, "get_bet mem {mem} exceeded budget {GET_BET_MEM_BUDGET}");
+    }
+
+    #[test]
+    fn bench_get_match_stays_within_budget() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        client.register_match(&6u64, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+
+        let (cpu, mem) = measure(&env, || {
+            client.get_match(&6u64);
+        });
+
+        assert!(cpu <= GET_MATCH_CPU_BUDGET, "get_match cpu {cpu} exceeded budget {GET_MATCH_CPU_BUDGET}");
+        assert!(mem <= GET_MATCH_MEM_BUDGET, "get_match mem {mem} exceeded budget {GET_MATCH_MEM_BUDGET}");
     }
 }

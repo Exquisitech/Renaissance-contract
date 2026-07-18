@@ -28,3 +28,14 @@ jobs:
           cargo check -p renaissance-player-nft --target wasm32v1-none --release
           cargo check -p renaissance-oracle --target wasm32v1-none --release
           cargo check -p renaissance-vault --target wasm32v1-none --release
+      - name: Gas budget benchmarks
+        # Runs the cpu/memory budget assertions in `counter` and `betting`'s
+        # `gas_bench` test modules (see docs/gas-benchmarks.md). Fails the
+        # build if any benchmarked function exceeds its configured budget.
+        # Scoped to these two crates rather than `--all` so this step tracks
+        # exactly the functions this benchmark suite covers; the other
+        # contract crates have their own pre-existing test suites that are
+        # out of scope for this gate.
+        run: |
+          cargo test --release -p renaissance-counter gas_bench
+          cargo test --release -p renaissance-betting gas_bench

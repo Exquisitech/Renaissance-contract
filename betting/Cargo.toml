@@ -10,4 +10,7 @@ crate-type = ["cdylib", "rlib"] # cdylib is required to emit optimized WASM bina
 
 [dependencies]
 soroban-sdk = { workspace = true }
-renaissance-core = { workspace = true } 
+renaissance-core = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
