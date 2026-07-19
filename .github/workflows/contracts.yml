@@ -17,9 +17,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32v1-none
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
       - name: Check workspace
         run: cargo check --all
+      - name: Run Clippy with warnings denied
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run dependency audit
+        run: cargo audit
       - name: Check contract WASM targets
         run: |
           cargo check -p renaissance-counter --target wasm32v1-none --release

@@ -353,7 +353,7 @@ impl FanRewardsContract {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Symbol};
+    use soroban_sdk::{symbol_short, testutils::{Address as _, Events}, Symbol};
 
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
@@ -391,7 +391,7 @@ mod test {
         assert!(res.is_err());
     }
 
-    fn client(env: &Env, contract_id: &Address) -> FanRewardsContractClient {
+    fn client<'a>(env: &'a Env, contract_id: &'a Address) -> FanRewardsContractClient<'a> {
         FanRewardsContractClient::new(env, contract_id)
     }
 

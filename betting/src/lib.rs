@@ -1,4 +1,5 @@
 #![no_std]
+#![forbid(unsafe_code)]
 
 //! `#![no_std]` `renaissance-betting` smart contract.
 //!
@@ -624,7 +625,7 @@ mod test {
         (env, admin, oracle, token)
     }
 
-    fn initialize(env: &Env, admin: &Address) -> RenaissanceBettingContractClient<'_> {
+    fn initialize<'a>(env: &'a Env, admin: &'a Address) -> RenaissanceBettingContractClient<'a> {
         let contract_id = env.register_contract(None, RenaissanceBettingContract);
         let client = RenaissanceBettingContractClient::new(env, &contract_id);
         client.initialize(admin);
@@ -659,7 +660,7 @@ mod test {
 
         let new_hash = BytesN::from_array(&env, &[9; 32]);
         client.upgrade(&new_hash).unwrap();
-        let res = client.try_upgrade(&new_hash);
+        let res = client.try_upgrade(&admin, &new_hash);
         assert!(res.is_err());
 
         let match_data = client.get_match(&20u64).unwrap();
@@ -1012,6 +1013,25 @@ mod test {
         let user = Address::generate(&env);
         let res = client.try_claim_payout(&user, &20);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_claim_payout_matches_documented_formula() {
+        let (env, admin, oracle, token) = setup();
+        let client = initialize(&env, &admin);
+        client.register_match(&21u64, &oracle, &token, &deadline_in(&env, 3_600));
+
+        let winner = Address::generate(&env);
+        let loser = Address::generate(&env);
+        mint(&env, &token, &winner, 1_000);
+        mint(&env, &token, &loser, 1_000);
+
+        client.place_bet(&winner, &21u64, &Outcome::HomeWin, &100i128);
+        client.place_bet(&loser, &21u64, &Outcome::Draw, &300i128);
+        client.settle_bet(&oracle, &21u64, &Outcome::HomeWin);
+
+        let payout = client.claim_payout(&winner, &21).unwrap();
+        assert_eq!(payout, 400);
     }
 
     // ── refund_bet ────────────────────────────────────────────────────────────
