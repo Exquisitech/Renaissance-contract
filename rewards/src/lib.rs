@@ -34,6 +34,16 @@ pub enum DataKey {
     WasmHash,
     /// Stored in persistent storage. One entry per user address.
     Balance(Address),
+    /// Pending admin transfer with timelock.
+    PendingAdmin,
+}
+
+/// Pending admin transfer request with timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminData {
+    pub new_admin: Address,
+    pub pending_until: u64,
 }
 
 // ── Contract errors ──────────────────────────────────────────────────────────
@@ -345,6 +355,51 @@ impl FanRewardsContract {
             .persistent()
             .get(&DataKey::Balance(user))
             .unwrap_or(0_i128)
+    }
+
+    // ── Emergency admin operations ───────────────────────────────────────────
+
+    /// Transfer admin rights with 48-hour timelock.
+    ///
+    /// First call schedules the transfer. Second call (after timelock expires)
+    /// executes it. Both calls require current admin auth.
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+
+        let key = DataKey::PendingAdmin;
+        if let Some(pending) = env.storage().instance().get::<_, PendingAdminData>(&key) {
+            if pending.new_admin != new_admin {
+                return Err(PlatformError::MismatchPendingData);
+            }
+            if env.ledger().timestamp() < pending.pending_until {
+                return Err(PlatformError::TimelockNotExpired);
+            }
+
+            env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&key);
+
+            let reason_hash = BytesN::from_array(&env, &[0u8; 32]);
+            env.events().publish(
+                (get_event_topic_by_string(&env, "EmergencyAction"),),
+                (Symbol::new(&env, "set_admin"), new_admin, reason_hash),
+            );
+            Ok(())
+        } else {
+            env.storage().instance().set(&key, &PendingAdminData {
+                new_admin: new_admin.clone(),
+                pending_until: env.ledger().timestamp() + 48 * 60 * 60,
+            });
+            Ok(())
+        }
+    }
+
+    /// Cancel a pending admin transfer.
+    pub fn cancel_set_admin(env: Env) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
     }
 }
 
@@ -701,5 +756,72 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
         assert_eq!(c.get_balance(&user), 0_i128);
+    }
+
+    // ── set_admin ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_admin_schedule_and_execute() {
+        let (env, _admin, contract_id) = setup();
+        let c = client(&env, &contract_id);
+
+        let new_admin = Address::generate(&env);
+
+        // Schedule
+        c.set_admin(&new_admin);
+
+        // Execute too early — should fail
+        env.ledger().set_timestamp(48 * 60 * 60 - 1);
+        let res = c.try_set_admin(&new_admin);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::TimelockNotExpired),
+            _ => panic!("expected TimelockNotExpired"),
+        }
+
+        // Execute after timelock — should succeed
+        env.ledger().set_timestamp(48 * 60 * 60);
+        c.set_admin(&new_admin);
+
+        // Verify new admin can call admin-only functions
+        assert_eq!(c.get_admin(), Some(new_admin));
+    }
+
+    #[test]
+    fn test_set_admin_cancel() {
+        let (env, _admin, contract_id) = setup();
+        let c = client(&env, &contract_id);
+
+        let new_admin = Address::generate(&env);
+
+        // Schedule
+        c.set_admin(&new_admin);
+
+        // Cancel
+        c.cancel_set_admin();
+
+        // Advance time — executing should start a new pending transfer
+        env.ledger().set_timestamp(48 * 60 * 60 + 1);
+        c.set_admin(&new_admin);
+
+        // Original admin should still be admin (new transfer is pending)
+        assert_eq!(c.get_admin(), Some(_admin));
+    }
+
+    #[test]
+    fn test_set_admin_rejects_mismatched_address() {
+        let (env, _admin, contract_id) = setup();
+        let c = client(&env, &contract_id);
+
+        let new_admin_a = Address::generate(&env);
+        let new_admin_b = Address::generate(&env);
+
+        c.set_admin(&new_admin_a);
+
+        // Try to confirm with a different address
+        let res = c.try_set_admin(&new_admin_b);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::MismatchPendingData),
+            _ => panic!("expected MismatchPendingData"),
+        }
     }
 }
