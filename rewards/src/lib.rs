@@ -55,7 +55,12 @@ impl FanRewardsContract {
     }
 
     fn ensure_not_paused(env: &Env) -> Result<(), PlatformError> {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Err(PlatformError::Paused);
         }
         Ok(())
@@ -75,9 +80,15 @@ impl FanRewardsContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::PlatformAdmin, &admin);
-        env.storage().instance().set(&DataKey::SecurityAdmin, &admin);
-        env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformAdmin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::SecurityAdmin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::TreasuryAdmin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
         // Re-bump instance storage TTL so config survives long inactivity.
         env.storage()
@@ -87,7 +98,11 @@ impl FanRewardsContract {
         Ok(())
     }
 
-    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), PlatformError> {
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), PlatformError> {
         let platform: Address = env
             .storage()
             .instance()
@@ -119,13 +134,20 @@ impl FanRewardsContract {
         approvals.push_back(caller.clone());
 
         if approvals.len() >= 2 {
-            env.storage().instance().set(&DataKey::WasmHash, &new_wasm_hash);
-            env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
-            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::<Address>::new(&env));
+            env.storage()
+                .instance()
+                .set(&DataKey::WasmHash, &new_wasm_hash);
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeApprovals, &Vec::<Address>::new(&env));
             env.events()
                 .publish((Symbol::new(&env, "Upgraded"),), new_wasm_hash);
         } else {
-            env.storage().instance().set(&DataKey::UpgradeApprovals, &approvals);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeApprovals, &approvals);
         }
         Ok(())
     }
@@ -133,7 +155,12 @@ impl FanRewardsContract {
     pub fn pause(env: Env) -> Result<(), PlatformError> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -145,12 +172,16 @@ impl FanRewardsContract {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
+        env.events()
+            .publish((Symbol::new(&env, "Unpaused"),), admin);
         Ok(())
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Return the currently configured platform admin, if any.
@@ -187,9 +218,7 @@ impl FanRewardsContract {
 
         let key = DataKey::Balance(user.clone());
         let current: i128 = env.storage().persistent().get(&key).unwrap_or(0_i128);
-        let new_balance = current
-            .checked_add(amount)
-            .ok_or(PlatformError::Overflow)?;
+        let new_balance = current.checked_add(amount).ok_or(PlatformError::Overflow)?;
 
         env.storage().persistent().set(&key, &new_balance);
         env.storage()
@@ -275,11 +304,7 @@ impl FanRewardsContract {
 
         // Debit source first; refuse if it would underflow into a negative balance.
         let from_key = DataKey::Balance(from.clone());
-        let from_balance: i128 = env
-            .storage()
-            .persistent()
-            .get(&from_key)
-            .unwrap_or(0_i128);
+        let from_balance: i128 = env.storage().persistent().get(&from_key).unwrap_or(0_i128);
         let new_from_balance = from_balance
             .checked_sub(amount)
             .ok_or(PlatformError::InvalidAmount)?;
@@ -349,9 +374,15 @@ mod test {
         let approver_a = Address::generate(&env);
         let approver_b = Address::generate(&env);
         env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::PlatformAdmin, &approver_a);
-            env.storage().instance().set(&DataKey::SecurityAdmin, &approver_b);
-            env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+            env.storage()
+                .instance()
+                .set(&DataKey::PlatformAdmin, &approver_a);
+            env.storage()
+                .instance()
+                .set(&DataKey::SecurityAdmin, &approver_b);
+            env.storage()
+                .instance()
+                .set(&DataKey::TreasuryAdmin, &admin);
         });
 
         let new_hash = BytesN::from_array(&env, &[7; 32]);
@@ -394,12 +425,8 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
 
-        c.award_points(
-            &user,
-            &100_i128,
-            &symbol_short!("watched"),
-        )
-        .unwrap();
+        c.award_points(&user, &100_i128, &symbol_short!("watched"))
+            .unwrap();
         assert_eq!(c.get_balance(&user), 100_i128);
     }
 
@@ -410,9 +437,12 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
 
-        c.award_points(&user, &100_i128, &symbol_short!("watched")).unwrap();
-        c.award_points(&user, &250_i128, &symbol_short!("shared")).unwrap();
-        c.award_points(&user, &50_i128, &symbol_short!("referral")).unwrap();
+        c.award_points(&user, &100_i128, &symbol_short!("watched"))
+            .unwrap();
+        c.award_points(&user, &250_i128, &symbol_short!("shared"))
+            .unwrap();
+        c.award_points(&user, &50_i128, &symbol_short!("referral"))
+            .unwrap();
 
         assert_eq!(c.get_balance(&user), 400_i128);
     }
@@ -478,7 +508,8 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
 
-        c.award_points(&user, &1_000_i128, &symbol_short!("watched")).unwrap();
+        c.award_points(&user, &1_000_i128, &symbol_short!("watched"))
+            .unwrap();
         c.redeem_points(&user, &400_i128, &symbol_short!("nft_drop"))
             .unwrap();
 
@@ -491,7 +522,8 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
 
-        c.award_points(&user, &500_i128, &symbol_short!("watched")).unwrap();
+        c.award_points(&user, &500_i128, &symbol_short!("watched"))
+            .unwrap();
         c.redeem_points(&user, &500_i128, &symbol_short!("nft_drop"))
             .unwrap();
 
@@ -510,7 +542,8 @@ mod test {
         assert!(res.is_err()); // InvalidAmount (underflow)
 
         // Award a small balance, then try to redeem more than they hold.
-        c.award_points(&user, &10_i128, &symbol_short!("watched")).unwrap();
+        c.award_points(&user, &10_i128, &symbol_short!("watched"))
+            .unwrap();
         let res = c.try_redeem_points(&user, &11_i128, &symbol_short!("nft_drop"));
         assert!(res.is_err()); // InvalidAmount (underflow)
 
@@ -524,7 +557,8 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
 
-        c.award_points(&user, &100_i128, &symbol_short!("watched")).unwrap();
+        c.award_points(&user, &100_i128, &symbol_short!("watched"))
+            .unwrap();
         let res = c.try_redeem_points(&user, &0_i128, &symbol_short!("nft_drop"));
         assert!(res.is_err()); // InvalidAmount
     }
@@ -535,7 +569,8 @@ mod test {
         let c = client(&env, &contract_id);
         let user = Address::generate(&env);
 
-        c.award_points(&user, &100_i128, &symbol_short!("watched")).unwrap();
+        c.award_points(&user, &100_i128, &symbol_short!("watched"))
+            .unwrap();
         let res = c.try_redeem_points(&user, &-10_i128, &symbol_short!("nft_drop"));
         assert!(res.is_err()); // InvalidAmount
     }
@@ -568,9 +603,7 @@ mod test {
             .unwrap();
 
         assert!(c.try_transfer_points(&alice, &bob, &0_i128).is_err());
-        assert!(c
-            .try_transfer_points(&alice, &bob, &-1_i128)
-            .is_err());
+        assert!(c.try_transfer_points(&alice, &bob, &-1_i128).is_err());
 
         // Balances unchanged after rejection.
         assert_eq!(c.get_balance(&alice), 100_i128);
@@ -597,7 +630,8 @@ mod test {
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
 
-        c.award_points(&alice, &5_i128, &symbol_short!("watched")).unwrap();
+        c.award_points(&alice, &5_i128, &symbol_short!("watched"))
+            .unwrap();
         let res = c.try_transfer_points(&alice, &bob, &6_i128);
         assert!(res.is_err()); // InvalidAmount (underflow)
 
