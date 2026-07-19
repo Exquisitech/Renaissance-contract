@@ -90,7 +90,7 @@ impl FootballOracleContract {
             .instance()
             .get(&DataKey::Oracles)
             .ok_or(PlatformError::Unauthorized)?;
-            
+
         let caller = env.current_contract_address();
         if !oracles.contains(&caller) {
             return Err(PlatformError::Unauthorized);
@@ -100,7 +100,12 @@ impl FootballOracleContract {
 
     /// Helper to check that contract is not paused
     fn ensure_not_paused(env: &Env) -> Result<(), PlatformError> {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Err(PlatformError::Paused);
         }
         Ok(())
@@ -108,7 +113,11 @@ impl FootballOracleContract {
 
     /// One-time initialization of the oracle contract.
     /// Sets up the admin and initial list of authorized oracles.
-    pub fn initialize(env: Env, admin: Address, initial_oracles: Vec<Address>) -> Result<(), PlatformError> {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        initial_oracles: Vec<Address>,
+    ) -> Result<(), PlatformError> {
         admin.require_auth();
 
         if env.storage().instance().has(&DataKey::Admin) {
@@ -121,14 +130,14 @@ impl FootballOracleContract {
         }
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::Oracles, &initial_oracles);
+        env.storage()
+            .instance()
+            .set(&DataKey::Oracles, &initial_oracles);
         env.storage().instance().set(&DataKey::Paused, &false);
 
         // Extend TTL for instance storage
         const MAX_TTL: u32 = 518400; // 30 days in ledgers (~5s per ledger)
-        env.storage()
-            .instance()
-            .extend_ttl(MAX_TTL, MAX_TTL);
+        env.storage().instance().extend_ttl(MAX_TTL, MAX_TTL);
 
         Ok(())
     }
@@ -168,23 +177,31 @@ impl FootballOracleContract {
         finished_at: u64,
     ) -> Result<(), OracleError> {
         Self::ensure_not_paused(&env).map_err(|_| OracleError::OracleUnauthorized)?;
-        
+
         let oracles = Self::ensure_oracle(&env).map_err(|_| OracleError::OracleUnauthorized)?;
         oracle.require_auth();
         let caller = oracle;
-        
+
         // Validate caller is in the oracle list
         if !oracles.contains(&caller) {
             return Err(OracleError::OracleUnauthorized);
         }
 
         // Check if match is already finalized
-        if env.storage().persistent().has(&DataKey::FinalizedResult(match_id)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FinalizedResult(match_id))
+        {
             return Err(OracleError::MatchAlreadyFinalized);
         }
 
         // Check if result is already pending
-        if env.storage().persistent().has(&DataKey::PendingResult(match_id)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PendingResult(match_id))
+        {
             return Err(OracleError::ResultAlreadyExists);
         }
 
@@ -210,8 +227,10 @@ impl FootballOracleContract {
             .set(&DataKey::PendingResult(match_id), &pending);
 
         // Emit ResultSubmitted event
-        env.events()
-            .publish((get_event_topic_by_string(&env, "ResultSubmitted"),), (match_id, caller));
+        env.events().publish(
+            (get_event_topic_by_string(&env, "ResultSubmitted"),),
+            (match_id, caller),
+        );
 
         Ok(())
     }
@@ -220,18 +239,22 @@ impl FootballOracleContract {
     /// When the second confirmation is received, the result is finalized.
     pub fn confirm_result(env: Env, oracle: Address, match_id: u64) -> Result<(), OracleError> {
         Self::ensure_not_paused(&env).map_err(|_| OracleError::OracleUnauthorized)?;
-        
+
         let oracles = Self::ensure_oracle(&env).map_err(|_| OracleError::OracleUnauthorized)?;
         oracle.require_auth();
         let caller = oracle;
-        
+
         // Validate caller is in the oracle list
         if !oracles.contains(&caller) {
             return Err(OracleError::OracleUnauthorized);
         }
 
         // Check if match is already finalized
-        if env.storage().persistent().has(&DataKey::FinalizedResult(match_id)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FinalizedResult(match_id))
+        {
             return Err(OracleError::MatchAlreadyFinalized);
         }
 
@@ -259,8 +282,10 @@ impl FootballOracleContract {
             .set(&DataKey::PendingResult(match_id), &pending);
 
         // Emit ResultConfirmed event
-        env.events()
-            .publish((get_event_topic_by_string(&env, "ResultConfirmed"),), (match_id, caller));
+        env.events().publish(
+            (get_event_topic_by_string(&env, "ResultConfirmed"),),
+            (match_id, caller),
+        );
 
         // Check if we have enough confirmations (2-of-N, so at least 1 confirmation since submitter is one)
         if pending.confirmations.len() >= 1 {
@@ -284,8 +309,10 @@ impl FootballOracleContract {
                 .remove(&DataKey::PendingResult(match_id));
 
             // Emit ResultFinalized event
-            env.events()
-                .publish((get_event_topic_by_string(&env, "ResultFinalized"),), match_id);
+            env.events().publish(
+                (get_event_topic_by_string(&env, "ResultFinalized"),),
+                match_id,
+            );
         }
 
         Ok(())
@@ -298,13 +325,15 @@ impl FootballOracleContract {
             .persistent()
             .get(&DataKey::FinalizedResult(match_id))
             .ok_or(OracleError::ResultNotFound)?;
-            
+
         Ok(result)
     }
 
     /// Check if a match result is finalized
     pub fn is_finalized(env: Env, match_id: u64) -> bool {
-        env.storage().persistent().has(&DataKey::FinalizedResult(match_id))
+        env.storage()
+            .persistent()
+            .has(&DataKey::FinalizedResult(match_id))
     }
 
     /// Get the list of all authorized oracles
