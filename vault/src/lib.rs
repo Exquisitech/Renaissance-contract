@@ -1,4 +1,5 @@
 #![no_std]
+#![forbid(unsafe_code)]
 
 //! `renaissance-vault` token vault contract for betting stakes.
 //!

@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::testutils::Ledger;
+use soroban_sdk::testutils::{Address as _, Ledger};
 use soroban_sdk::{testutils::AddressEnvTestUtils, Address, Env, Vec};
 
 #[test]
@@ -71,7 +71,7 @@ fn test_submit_result_success() {
     let finished_at = now - 600; // 10 minutes ago
 
     oracle1.require_auth();
-    client.submit_result(&match_id, &2, &1, &started_at, &finished_at);
+    client.submit_result(&oracle1, &match_id, &2, &1, &started_at, &finished_at);
 
     // Result shouldn't be finalized yet (needs second confirmation)
     assert!(!client.is_finalized(&match_id));
@@ -101,7 +101,7 @@ fn test_submit_result_unauthorized() {
 
     // Unauthorized address tries to submit
     let match_id = 123;
-    client.submit_result(&match_id, &2, &1, &(now - 3600), &(now - 600));
+    client.submit_result(&unauthorized, &match_id, &2, &1, &(now - 3600), &(now - 600));
 }
 
 #[test]
@@ -161,11 +161,11 @@ fn test_double_submit() {
 
     // First submission from oracle1
     oracle1.require_auth();
-    client.submit_result(&match_id, &2, &1, &started_at, &finished_at);
+    client.submit_result(&oracle1, &match_id, &2, &1, &started_at, &finished_at);
 
     // Second submission from oracle2 for the same match - should fail
     oracle2.require_auth();
-    client.submit_result(&match_id, &3, &1, &started_at, &finished_at);
+    client.submit_result(&oracle2, &match_id, &3, &1, &started_at, &finished_at);
 }
 
 #[test]
@@ -194,11 +194,11 @@ fn test_confirm_and_finalize() {
 
     // Submit from oracle1
     oracle1.require_auth();
-    client.submit_result(&match_id, &2, &1, &started_at, &finished_at);
+    client.submit_result(&oracle1, &match_id, &2, &1, &started_at, &finished_at);
 
     // Confirm from oracle2 - this should finalize
     oracle2.require_auth();
-    client.confirm_result(&match_id);
+    client.confirm_result(&oracle2, &match_id);
 
     // Check if finalized
     assert!(client.is_finalized(&match_id));
@@ -238,11 +238,11 @@ fn test_cannot_confirm_own_submission() {
 
     // Submit from oracle1
     oracle1.require_auth();
-    client.submit_result(&match_id, &2, &1, &started_at, &finished_at);
+    client.submit_result(&oracle1, &match_id, &2, &1, &started_at, &finished_at);
 
     // Try to confirm own submission - should fail
     oracle1.require_auth();
-    client.confirm_result(&match_id);
+    client.confirm_result(&oracle1, &match_id);
 }
 
 #[test]
@@ -274,13 +274,13 @@ fn test_double_confirm() {
 
     // Submit from oracle1
     oracle1.require_auth();
-    client.submit_result(&match_id, &2, &1, &started_at, &finished_at);
+    client.submit_result(&oracle1, &match_id, &2, &1, &started_at, &finished_at);
 
     // Confirm from oracle2
     oracle2.require_auth();
-    client.confirm_result(&match_id);
+    client.confirm_result(&oracle2, &match_id);
 
     // Try to confirm again from oracle2 - should fail
     oracle2.require_auth();
-    client.confirm_result(&match_id);
+    client.confirm_result(&oracle2, &match_id);
 }

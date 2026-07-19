@@ -1,9 +1,9 @@
 #![cfg(test)]
 
-use super::*;
-use soroban_sdk::testutils::Ledger;
-use soroban_sdk::token::Client;
-use soroban_sdk::{testutils::AddressEnvTestUtils, Address, Env};
+use super::{RenaissanceVaultContract, RenaissanceVaultContractClient};
+use soroban_sdk::testutils::{Address as _, Ledger};
+use soroban_sdk::token::StellarAssetClient;
+use soroban_sdk::{Address, Env};
 
 #[test]
 fn test_initialize() {
@@ -48,7 +48,7 @@ fn test_deposit_withdraw() {
 
     // Deploy and initialize token contract (mock SAC)
     let token_contract = env.register_stellar_asset_contract(admin.clone());
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
 
     // Deploy vault
     let vault_id = env.register_contract(None, RenaissanceVaultContract);
@@ -62,28 +62,25 @@ fn test_deposit_withdraw() {
 
     // Deposit into vault
     user.require_auth();
-    vault_client.deposit(&user, &500, &token_contract.get_address());
+    vault_client.deposit(&user, &500, &token_contract);
 
     // Check balances
-    let user_balance = vault_client.get_user_balance(&user, &token_contract.get_address());
+    let user_balance = vault_client.get_user_balance(&user, &token_contract);
     assert_eq!(user_balance.available, 500);
     assert_eq!(user_balance.locked, 0);
     assert_eq!(
-        vault_client.get_vault_balance(&token_contract.get_address()),
+        vault_client.get_vault_balance(&token_contract),
         500
     );
 
     // Withdraw some
     user.require_auth();
-    vault_client.withdraw(&user, &200, &token_contract.get_address());
+    vault_client.withdraw(&user, &200, &token_contract);
 
     // Check updated balances
-    let user_balance = vault_client.get_user_balance(&user, &token_contract.get_address());
+    let user_balance = vault_client.get_user_balance(&user, &token_contract);
     assert_eq!(user_balance.available, 300);
-    assert_eq!(
-        vault_client.get_vault_balance(&token_contract.get_address()),
-        300
-    );
+    assert_eq!(vault_client.get_vault_balance(&token_contract), 300);
 }
 
 #[test]
@@ -100,16 +97,16 @@ fn test_withdraw_insufficient_balance() {
     vault_client.initialize(&admin, &betting_contract);
 
     let user = Address::generate(&env);
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
     token_client.mint(&user, &1000);
 
     // Deposit 300
     user.require_auth();
-    vault_client.deposit(&user, &300, &token_contract.get_address());
+    vault_client.deposit(&user, &300, &token_contract);
 
     // Try to withdraw 400 - should fail
     user.require_auth();
-    vault_client.withdraw(&user, &400, &token_contract.get_address());
+    vault_client.withdraw(&user, &400, &token_contract);
 }
 
 #[test]
@@ -125,22 +122,22 @@ fn test_lock_for_bet_success() {
     vault_client.initialize(&admin, &betting_contract);
 
     let user = Address::generate(&env);
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
     token_client.mint(&user, &1000);
 
     // Deposit funds
     user.require_auth();
-    vault_client.deposit(&user, &500, &token_contract.get_address());
+    vault_client.deposit(&user, &500, &token_contract);
 
     // Betting contract locks funds for a bet
     betting_contract.require_auth();
-    vault_client.lock_for_bet(&user, &200, &token_contract.get_address(), &123);
+    vault_client.lock_for_bet(&user, &200, &token_contract, &123);
 
     // Check balances after lock
-    let user_balance = vault_client.get_user_balance(&user, &token_contract.get_address());
+    let user_balance = vault_client.get_user_balance(&user, &token_contract);
     assert_eq!(user_balance.available, 300);
     assert_eq!(user_balance.locked, 200);
-    assert!(vault_client.is_locked_for_bet(&123, &user, &token_contract.get_address()));
+    assert!(vault_client.is_locked_for_bet(&123, &user, &token_contract));
 }
 
 #[test]
@@ -157,16 +154,16 @@ fn test_lock_for_bet_insufficient_balance() {
     vault_client.initialize(&admin, &betting_contract);
 
     let user = Address::generate(&env);
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
     token_client.mint(&user, &1000);
 
     // Deposit only 100
     user.require_auth();
-    vault_client.deposit(&user, &100, &token_contract.get_address());
+    vault_client.deposit(&user, &100, &token_contract);
 
     // Try to lock 200 - should fail
     betting_contract.require_auth();
-    vault_client.lock_for_bet(&user, &200, &token_contract.get_address(), &123);
+    vault_client.lock_for_bet(&user, &200, &token_contract, &123);
 }
 
 #[test]
@@ -200,25 +197,25 @@ fn test_payout_success() {
     vault_client.initialize(&admin, &betting_contract);
 
     let winner = Address::generate(&env);
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
     token_client.mint(&winner, &1000);
 
     // Deposit and lock funds
     winner.require_auth();
-    vault_client.deposit(&winner, &500, &token_contract.get_address());
+    vault_client.deposit(&winner, &500, &token_contract);
 
     betting_contract.require_auth();
-    vault_client.lock_for_bet(&winner, &200, &token_contract.get_address(), &123);
+    vault_client.lock_for_bet(&winner, &200, &token_contract, &123);
 
     // Payout winnings
     betting_contract.require_auth();
-    vault_client.payout(&winner, &300, &token_contract.get_address(), &123);
+    vault_client.payout(&winner, &300, &token_contract, &123);
 
     // Check final balances
-    let user_balance = vault_client.get_user_balance(&winner, &token_contract.get_address());
+    let user_balance = vault_client.get_user_balance(&winner, &token_contract);
     assert_eq!(user_balance.available, 600); // 300 left + 300 winnings
     assert_eq!(user_balance.locked, 0);
-    assert!(!vault_client.is_locked_for_bet(&123, &winner, &token_contract.get_address()));
+    assert!(!vault_client.is_locked_for_bet(&123, &winner, &token_contract));
 }
 
 #[test]
@@ -234,23 +231,23 @@ fn test_emergency_withdraw_schedule_and_execute() {
     vault_client.initialize(&admin, &betting_contract);
 
     let to = Address::generate(&env);
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
 
     // Simulate some tokens stuck in the contract
     token_client.mint(&vault_id, &1000);
 
     // Schedule emergency withdraw
     admin.require_auth();
-    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    vault_client.emergency_withdraw(&token_contract, &to, &500);
 
     // Fast forward past 24 hours
     env.ledger().set_timestamp(24 * 60 * 60 + 1);
 
     // Execute
     admin.require_auth();
-    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    vault_client.emergency_withdraw(&token_contract, &to, &500);
 
-    assert_eq!(token_client.balance(&to), 500);
+    assert_eq!(token_client.balance(&to), 500_i128);
 }
 
 #[test]
@@ -267,21 +264,21 @@ fn test_emergency_withdraw_cancel() {
     let to = Address::generate(&env);
 
     admin.require_auth();
-    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
+    vault_client.emergency_withdraw(&token_contract, &to, &500);
 
     // Cancel
     admin.require_auth();
-    vault_client.cancel_emergency_withdraw(&token_contract.get_address());
+    vault_client.cancel_emergency_withdraw(&token_contract);
 
     // Fast forward
     env.ledger().set_timestamp(24 * 60 * 60 + 1);
 
     // Execute should fail because it was cancelled
     // It will try to schedule again, so let's just make sure it doesn't transfer
-    let token_client = Client::new(&env, &token_contract.get_address());
+    let token_client = StellarAssetClient::new(&env, &token_contract);
     token_client.mint(&vault_id, &1000);
-    vault_client.emergency_withdraw(&token_contract.get_address(), &to, &500);
-    assert_eq!(token_client.balance(&to), 0); // Not transferred, just scheduled again
+    vault_client.emergency_withdraw(&token_contract, &to, &500);
+    assert_eq!(token_client.balance(&to), 0_i128); // Not transferred, just scheduled again
 }
 
 #[test]
@@ -346,25 +343,25 @@ fn test_recover_token() {
     // Tracked token
     let tracked_token = env.register_stellar_asset_contract(admin.clone());
     let user = Address::generate(&env);
-    let token_client = Client::new(&env, &tracked_token.get_address());
+    let token_client = StellarAssetClient::new(&env, &tracked_token);
     token_client.mint(&user, &1000);
 
     user.require_auth();
-    vault_client.deposit(&user, &500, &tracked_token.get_address());
+    vault_client.deposit(&user, &500, &tracked_token);
 
     // Recover should fail for tracked token
     let to = Address::generate(&env);
     admin.require_auth();
-    let result = vault_client.try_recover_token(&tracked_token.get_address(), &to, &100);
+    let result = vault_client.try_recover_token(&tracked_token, &to, &100);
     assert!(result.is_err());
 
     // Untracked token
     let untracked_token = env.register_stellar_asset_contract(admin.clone());
-    let untracked_client = Client::new(&env, &untracked_token.get_address());
+    let untracked_client = StellarAssetClient::new(&env, &untracked_token);
     untracked_client.mint(&vault_id, &500); // Send directly to contract
 
     // Recover should succeed
     admin.require_auth();
-    vault_client.recover_token(&untracked_token.get_address(), &to, &500);
+    vault_client.recover_token(&untracked_token, &to, &500);
     assert_eq!(untracked_client.balance(&to), 500);
 }
