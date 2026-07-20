@@ -44,10 +44,8 @@
 //! - `refund_bet`     : user pulls a refund after the deadline if no settlement
 //! - `claim_payout`   : user pulls parimutuel winnings once the match is settled
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec,
-};
 use renaissance_core::PlatformError;
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec};
 
 // ── Outcomes ──────────────────────────────────────────────────────────────────
 
@@ -153,7 +151,12 @@ impl RenaissanceBettingContract {
     }
 
     fn ensure_not_paused(env: &Env) -> Result<(), PlatformError> {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Err(PlatformError::Paused);
         }
         Ok(())
@@ -169,16 +172,26 @@ impl RenaissanceBettingContract {
             return Err(PlatformError::Unauthorized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::PlatformAdmin, &admin);
-        env.storage().instance().set(&DataKey::SecurityAdmin, &admin);
-        env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformAdmin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::SecurityAdmin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::TreasuryAdmin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events()
             .publish((Symbol::new(&env, "ContractInitialized"),), admin);
         Ok(())
     }
 
-    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), PlatformError> {
+    pub fn upgrade(
+        env: Env,
+        caller: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), PlatformError> {
         let platform: Address = env
             .storage()
             .instance()
@@ -210,13 +223,20 @@ impl RenaissanceBettingContract {
         approvals.push_back(caller.clone());
 
         if approvals.len() >= 2 {
-            env.storage().instance().set(&DataKey::WasmHash, &new_wasm_hash);
-            env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
-            env.storage().instance().set(&DataKey::UpgradeApprovals, &Vec::<Address>::new(&env));
+            env.storage()
+                .instance()
+                .set(&DataKey::WasmHash, &new_wasm_hash);
+            env.deployer()
+                .update_current_contract_wasm(new_wasm_hash.clone());
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeApprovals, &Vec::<Address>::new(&env));
             env.events()
                 .publish((Symbol::new(&env, "Upgraded"),), new_wasm_hash);
         } else {
-            env.storage().instance().set(&DataKey::UpgradeApprovals, &approvals);
+            env.storage()
+                .instance()
+                .set(&DataKey::UpgradeApprovals, &approvals);
         }
         Ok(())
     }
@@ -224,7 +244,12 @@ impl RenaissanceBettingContract {
     pub fn pause(env: Env) -> Result<(), PlatformError> {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return Ok(());
         }
         env.storage().instance().set(&DataKey::Paused, &true);
@@ -236,12 +261,16 @@ impl RenaissanceBettingContract {
         let admin = Self::require_admin(&env)?;
         admin.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
-        env.events().publish((Symbol::new(&env, "Unpaused"),), admin);
+        env.events()
+            .publish((Symbol::new(&env, "Unpaused"),), admin);
         Ok(())
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// Define a new match id with its authorized oracle, settlement token,
@@ -286,17 +315,15 @@ impl RenaissanceBettingContract {
             .instance()
             .set(&DataKey::Stats(match_id), &stats);
 
-        env.events()
-            .publish((Symbol::new(&env, "MatchRegistered"), admin), (match_id, oracle, token, deadline));
+        env.events().publish(
+            (Symbol::new(&env, "MatchRegistered"), admin),
+            (match_id, oracle, token, deadline),
+        );
         Ok(())
     }
 
     /// Replace the oracle of an unsettled match. Admin only.
-    pub fn set_oracle(
-        env: Env,
-        match_id: u64,
-        new_oracle: Address,
-    ) -> Result<(), PlatformError> {
+    pub fn set_oracle(env: Env, match_id: u64, new_oracle: Address) -> Result<(), PlatformError> {
         Self::ensure_not_paused(&env)?;
         let admin: Address = env
             .storage()
@@ -444,11 +471,7 @@ impl RenaissanceBettingContract {
     /// ```
     ///
     /// Emits `BetClaimed` with the paid amount.
-    pub fn claim_payout(
-        env: Env,
-        user: Address,
-        match_id: u64,
-    ) -> Result<i128, PlatformError> {
+    pub fn claim_payout(env: Env, user: Address, match_id: u64) -> Result<i128, PlatformError> {
         Self::ensure_not_paused(&env)?;
         user.require_auth();
         let key = DataKey::Bet(match_id, user.clone());
@@ -516,21 +539,15 @@ impl RenaissanceBettingContract {
         let token_client = token::Client::new(&env, &m.token);
         token_client.transfer(&env.current_contract_address(), &user, &payout);
 
-        env.events().publish(
-            (Symbol::new(&env, "BetClaimed"), user),
-            (match_id, payout),
-        );
+        env.events()
+            .publish((Symbol::new(&env, "BetClaimed"), user), (match_id, payout));
         Ok(payout)
     }
 
     /// Refund the user's full bet amount if the match has passed its deadline
     /// without being settled. Idempotent per `(user, match_id)`.
     /// Emits `BetRefunded`.
-    pub fn refund_bet(
-        env: Env,
-        user: Address,
-        match_id: u64,
-    ) -> Result<(), PlatformError> {
+    pub fn refund_bet(env: Env, user: Address, match_id: u64) -> Result<(), PlatformError> {
         Self::ensure_not_paused(&env)?;
         user.require_auth();
         let key = DataKey::Bet(match_id, user.clone());
@@ -571,7 +588,12 @@ impl RenaissanceBettingContract {
     /// storage — see the "Storage / gas notes" section of this module's
     /// doc comment for why that's the safe choice for fund-bearing state.
     pub fn get_bet(env: Env, user: Address, match_id: u64) -> Option<Bet> {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return None;
         }
         env.storage()
@@ -582,7 +604,12 @@ impl RenaissanceBettingContract {
     /// Look up a match descriptor. Returns `None` if the match id is
     /// not registered.
     pub fn get_match(env: Env, match_id: u64) -> Option<Match> {
-        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
             return None;
         }
         env.storage().instance().get(&DataKey::Match(match_id))
@@ -632,9 +659,15 @@ mod test {
         let approver_a = Address::generate(&env);
         let approver_b = Address::generate(&env);
         env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::PlatformAdmin, &approver_a);
-            env.storage().instance().set(&DataKey::SecurityAdmin, &approver_b);
-            env.storage().instance().set(&DataKey::TreasuryAdmin, &admin);
+            env.storage()
+                .instance()
+                .set(&DataKey::PlatformAdmin, &approver_a);
+            env.storage()
+                .instance()
+                .set(&DataKey::SecurityAdmin, &approver_b);
+            env.storage()
+                .instance()
+                .set(&DataKey::TreasuryAdmin, &admin);
         });
 
         let new_hash = BytesN::from_array(&env, &[9; 32]);
@@ -777,8 +810,7 @@ mod test {
         client.register_match(&8u64, &oracle, &token, &deadline_in(&env, 3_600));
         let user = Address::generate(&env);
         mint(&env, &token, &user, 100);
-        let res =
-            client.try_place_bet(&user, &8u64, &Outcome::HomeWin, &500i128);
+        let res = client.try_place_bet(&user, &8u64, &Outcome::HomeWin, &500i128);
         match res {
             Err(Ok(e)) => assert_eq!(e, PlatformError::InsufficientBalance),
             _ => panic!("expected InsufficientBalance contract error"),
@@ -794,8 +826,7 @@ mod test {
         mint(&env, &token, &user, 1_000);
 
         env.ledger().set_timestamp(deadline_in(&env, 3_600) + 1);
-        let res =
-            client.try_place_bet(&user, &9u64, &Outcome::HomeWin, &100i128);
+        let res = client.try_place_bet(&user, &9u64, &Outcome::HomeWin, &100i128);
         match res {
             Err(Ok(e)) => assert_eq!(e, PlatformError::ExpiredDeadline),
             _ => panic!("expected ExpiredDeadline contract error"),
@@ -857,7 +888,7 @@ mod test {
 
         let m = client.get_match(&13).unwrap();
         assert!(m.settled);
-        assert_eq!(m.outcome, Some(Outcome::Draw));
+        assert_eq!(m.outcome, Some(Outcome::Draw.index()));
     }
 
     #[test]
@@ -917,11 +948,11 @@ mod test {
         let tc = token::Client::new(&env, &token);
 
         let bal_before = tc.balance(&w1);
-        let payout1 = client.claim_payout(&w1, &16).unwrap();
+        let payout1 = client.claim_payout(&w1, &16);
         assert_eq!(payout1, 200);
         assert_eq!(tc.balance(&w1), bal_before + 200);
 
-        let payout2 = client.claim_payout(&w2, &16).unwrap();
+        let payout2 = client.claim_payout(&w2, &16);
         assert_eq!(payout2, 200);
         // w2: 1_000 mint - 100 bet + 200 payout = 1_100
         assert_eq!(tc.balance(&w2), 1_100);
@@ -943,7 +974,7 @@ mod test {
         client.place_bet(&loser, &17u64, &Outcome::Draw, &300i128);
         client.settle_bet(&oracle, &17u64, &Outcome::HomeWin);
 
-        let payout = client.claim_payout(&winner, &17).unwrap();
+        let payout = client.claim_payout(&winner, &17);
         assert_eq!(payout, 400);
 
         // Loser cannot claim (their outcome != winning outcome).
@@ -961,7 +992,7 @@ mod test {
         mint(&env, &token, &user, 1_000);
         client.place_bet(&user, &18u64, &Outcome::HomeWin, &100i128);
         client.settle_bet(&oracle, &18u64, &Outcome::HomeWin);
-        client.claim_payout(&user, &18).unwrap();
+        client.claim_payout(&user, &18);
 
         let res = client.try_claim_payout(&user, &18);
         assert!(res.is_err());
