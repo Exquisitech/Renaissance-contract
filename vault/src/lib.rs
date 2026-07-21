@@ -74,6 +74,10 @@ pub enum VaultError {
     TokenIsTracked = 206,
     /// Mismatch in pending data
     MismatchPendingData = 207,
+    /// Contract is paused: state-changing operations are disabled
+    Paused = 208,
+    /// Caller is not the vault admin
+    Unauthorized = 209,
 }
 
 #[contracttype]
@@ -126,16 +130,67 @@ impl RenaissanceVaultContract {
     }
 
     /// Helper to ensure contract is not paused
-    fn ensure_not_paused(env: &Env) -> Result<(), PlatformError> {
+    fn ensure_not_paused(env: &Env) -> Result<(), VaultError> {
         if env
             .storage()
             .instance()
             .get(&DataKey::Paused)
             .unwrap_or(false)
         {
-            return Err(PlatformError::Paused);
+            return Err(VaultError::Paused);
         }
         Ok(())
+    }
+
+    /// Helper to fetch and authenticate the vault admin.
+    fn require_admin(env: &Env) -> Result<Address, VaultError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(VaultError::Unauthorized)?;
+        admin.require_auth();
+        Ok(admin)
+    }
+
+    /// Pause the vault, disabling all critical state-changing operations
+    /// (`deposit`, `withdraw`, `lock_for_bet`, `payout`). Admin only.
+    ///
+    /// Idempotent: pausing an already-paused vault is a no-op. Emits a
+    /// `Paused` event logging the admin that triggered the action.
+    pub fn pause(env: Env) -> Result<(), VaultError> {
+        let admin = Self::require_admin(&env)?;
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events()
+            .publish((get_event_topic_by_string(&env, "Paused"),), admin);
+        Ok(())
+    }
+
+    /// Unpause the vault, re-enabling critical state-changing operations.
+    /// Admin only. Emits an `Unpaused` event logging the admin that
+    /// triggered the action.
+    pub fn unpause(env: Env) -> Result<(), VaultError> {
+        let admin = Self::require_admin(&env)?;
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((get_event_topic_by_string(&env, "Unpaused"),), admin);
+        Ok(())
+    }
+
+    /// Returns `true` if the vault is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     /// One-time initialization of the vault contract
@@ -195,7 +250,7 @@ impl RenaissanceVaultContract {
             return Err(VaultError::InvalidAmount);
         }
 
-        Self::ensure_not_paused(&env).map_err(|_| VaultError::InvalidAmount)?;
+        Self::ensure_not_paused(&env)?;
         user.require_auth();
 
         // Use reentrancy guard to prevent recursive calls
@@ -259,7 +314,7 @@ impl RenaissanceVaultContract {
             return Err(VaultError::InvalidAmount);
         }
 
-        Self::ensure_not_paused(&env).map_err(|_| VaultError::InvalidAmount)?;
+        Self::ensure_not_paused(&env)?;
         user.require_auth();
 
         Self::enter_reentrancy_guard(&env)?;
@@ -321,7 +376,7 @@ impl RenaissanceVaultContract {
             return Err(VaultError::InvalidAmount);
         }
 
-        Self::ensure_not_paused(&env).map_err(|_| VaultError::InvalidAmount)?;
+        Self::ensure_not_paused(&env)?;
         // Ensure only the betting contract can call this
         Self::ensure_betting_contract(&env).map_err(|_| VaultError::UnauthorizedBettingContract)?;
 
@@ -389,7 +444,7 @@ impl RenaissanceVaultContract {
             return Err(VaultError::InvalidAmount);
         }
 
-        Self::ensure_not_paused(&env).map_err(|_| VaultError::InvalidAmount)?;
+        Self::ensure_not_paused(&env)?;
         Self::ensure_betting_contract(&env).map_err(|_| VaultError::UnauthorizedBettingContract)?;
 
         Self::enter_reentrancy_guard(&env)?;
