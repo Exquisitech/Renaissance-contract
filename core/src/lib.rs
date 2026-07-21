@@ -17,6 +17,9 @@ pub enum PlatformError {
     /// acceptance criterion that bets only settle against real balances.
     InsufficientBalance = 6,
     Paused = 7,
+    TimelockNotExpired = 8,
+    MismatchPendingData = 9,
+    TokenIsTracked = 10,
 }
 
 /// Standardized tracking data configuration for interactive betting matches

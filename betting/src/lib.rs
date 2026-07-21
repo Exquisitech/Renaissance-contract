@@ -44,8 +44,10 @@
 //! - `refund_bet`     : user pulls a refund after the deadline if no settlement
 //! - `claim_payout`   : user pulls parimutuel winnings once the match is settled
 
-use renaissance_core::PlatformError;
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol, Vec,
+};
+use renaissance_core::{get_event_topic_by_string, PlatformError};
 
 // ── Outcomes ──────────────────────────────────────────────────────────────────
 
@@ -119,6 +121,23 @@ pub struct Bet {
     pub payout: i128,
 }
 
+/// Pending emergency withdrawal request with timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingWithdrawal {
+    pub to: Address,
+    pub amount: i128,
+    pub pending_until: u64,
+}
+
+/// Pending admin transfer request with timelock.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminData {
+    pub new_admin: Address,
+    pub pending_until: u64,
+}
+
 /// Storage namespace. Admin lives in instance storage (singleton),
 /// match descriptors and stats live in instance storage keyed by match id,
 /// and bets live in persistent storage keyed by (match id, user).
@@ -134,6 +153,9 @@ pub enum DataKey {
     Match(u64),
     Stats(u64),
     Bet(u64, Address),
+    PendingWithdrawal(Address),
+    PendingAdmin,
+    TrackedTokens,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -182,6 +204,7 @@ impl RenaissanceBettingContract {
             .instance()
             .set(&DataKey::TreasuryAdmin, &admin);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::TrackedTokens, &Vec::<Address>::new(&env));
         env.events()
             .publish((Symbol::new(&env, "ContractInitialized"),), admin);
         Ok(())
@@ -315,10 +338,18 @@ impl RenaissanceBettingContract {
             .instance()
             .set(&DataKey::Stats(match_id), &stats);
 
-        env.events().publish(
-            (Symbol::new(&env, "MatchRegistered"), admin),
-            (match_id, oracle, token, deadline),
-        );
+        let mut tracked: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TrackedTokens)
+            .unwrap_or(Vec::new(&env));
+        if !tracked.iter().any(|t| t == token) {
+            tracked.push_back(token.clone());
+            env.storage().instance().set(&DataKey::TrackedTokens, &tracked);
+        }
+
+        env.events()
+            .publish((Symbol::new(&env, "MatchRegistered"), admin), (match_id, oracle, token, deadline));
         Ok(())
     }
 
@@ -613,6 +644,152 @@ impl RenaissanceBettingContract {
             return None;
         }
         env.storage().instance().get(&DataKey::Match(match_id))
+    }
+
+    // ── Emergency admin operations ───────────────────────────────────────────
+
+    /// Emergency withdraw of an asset with 24-hour timelock.
+    ///
+    /// First call schedules the withdrawal. Second call (after timelock expires)
+    /// executes it. Both calls require admin auth and identical parameters.
+    pub fn emergency_withdraw(
+        env: Env,
+        asset: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), PlatformError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)?;
+        admin.require_auth();
+
+        let key = DataKey::PendingWithdrawal(asset.clone());
+        if let Some(pending) = env.storage().instance().get::<_, PendingWithdrawal>(&key) {
+            if pending.to != to || pending.amount != amount {
+                return Err(PlatformError::MismatchPendingData);
+            }
+            if env.ledger().timestamp() < pending.pending_until {
+                return Err(PlatformError::TimelockNotExpired);
+            }
+
+            let client = token::Client::new(&env, &asset);
+            client.transfer(&env.current_contract_address(), &to, &amount);
+            env.storage().instance().remove(&key);
+
+            let reason_hash = BytesN::from_array(&env, &[0u8; 32]);
+            env.events().publish(
+                (get_event_topic_by_string(&env, "EmergencyAction"),),
+                (Symbol::new(&env, "emergency_withdraw"), asset, to, amount, reason_hash),
+            );
+            Ok(())
+        } else {
+            env.storage().instance().set(&key, &PendingWithdrawal {
+                to: to.clone(),
+                amount,
+                pending_until: env.ledger().timestamp() + 24 * 60 * 60,
+            });
+            Ok(())
+        }
+    }
+
+    /// Cancel a pending emergency withdrawal.
+    pub fn cancel_emergency_withdraw(env: Env, asset: Address) -> Result<(), PlatformError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)?;
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingWithdrawal(asset));
+        Ok(())
+    }
+
+    /// Recover accidentally sent tokens. Only works for tokens not tracked
+    /// by the contract's intended logic (i.e., not used in any registered match).
+    pub fn recover_token(
+        env: Env,
+        asset: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), PlatformError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)?;
+        admin.require_auth();
+
+        let tracked: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TrackedTokens)
+            .unwrap_or(Vec::new(&env));
+        if tracked.iter().any(|t| t == asset) {
+            return Err(PlatformError::TokenIsTracked);
+        }
+
+        let client = token::Client::new(&env, &asset);
+        client.transfer(&env.current_contract_address(), &to, &amount);
+
+        let reason_hash = BytesN::from_array(&env, &[0u8; 32]);
+        env.events().publish(
+            (get_event_topic_by_string(&env, "EmergencyAction"),),
+            (Symbol::new(&env, "recover_token"), asset, to, amount, reason_hash),
+        );
+        Ok(())
+    }
+
+    /// Transfer admin rights with 48-hour timelock.
+    ///
+    /// First call schedules the transfer. Second call (after timelock expires)
+    /// executes it. Both calls require current admin auth.
+    pub fn set_admin(env: Env, new_admin: Address) -> Result<(), PlatformError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)?;
+        admin.require_auth();
+
+        let key = DataKey::PendingAdmin;
+        if let Some(pending) = env.storage().instance().get::<_, PendingAdminData>(&key) {
+            if pending.new_admin != new_admin {
+                return Err(PlatformError::MismatchPendingData);
+            }
+            if env.ledger().timestamp() < pending.pending_until {
+                return Err(PlatformError::TimelockNotExpired);
+            }
+
+            env.storage().instance().set(&DataKey::Admin, &new_admin);
+            env.storage().instance().remove(&key);
+
+            let reason_hash = BytesN::from_array(&env, &[0u8; 32]);
+            env.events().publish(
+                (get_event_topic_by_string(&env, "EmergencyAction"),),
+                (Symbol::new(&env, "set_admin"), new_admin, reason_hash),
+            );
+            Ok(())
+        } else {
+            env.storage().instance().set(&key, &PendingAdminData {
+                new_admin: new_admin.clone(),
+                pending_until: env.ledger().timestamp() + 48 * 60 * 60,
+            });
+            Ok(())
+        }
+    }
+
+    /// Cancel a pending admin transfer.
+    pub fn cancel_set_admin(env: Env) -> Result<(), PlatformError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(PlatformError::Unauthorized)?;
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
     }
 }
 
@@ -1118,6 +1295,180 @@ mod test {
         client.register_match(&100u64, &oracle, &token, &deadline_in(&env, 100));
         let m = client.get_match(&100).unwrap();
         assert_eq!(m.match_id, 100);
+    }
+
+    // ── emergency_withdraw ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_emergency_withdraw_schedule_and_execute() {
+        let (env, admin, oracle, token) = setup();
+        let client = initialize(&env, &admin);
+
+        let to = Address::generate(&env);
+        let tc = token::Client::new(&env, &token);
+
+        // Send tokens directly to the contract (simulating stuck funds)
+        mint(&env, &token, &admin, 1_000);
+        tc.transfer(&admin, &env.current_contract_address(), &1_000);
+
+        // First call schedules the withdrawal
+        client.emergency_withdraw(&token, &to, &500);
+
+        // Execute too early — should fail
+        env.ledger().set_timestamp(1_000_000 + 24 * 60 * 60 - 1);
+        let res = client.try_emergency_withdraw(&token, &to, &500);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::TimelockNotExpired),
+            _ => panic!("expected TimelockNotExpired"),
+        }
+
+        // Execute after timelock — should succeed
+        env.ledger().set_timestamp(1_000_000 + 24 * 60 * 60);
+        client.emergency_withdraw(&token, &to, &500);
+        assert_eq!(tc.balance(&to), 500);
+    }
+
+    #[test]
+    fn test_emergency_withdraw_cancel() {
+        let (env, admin, _oracle, token) = setup();
+        let client = initialize(&env, &admin);
+
+        let to = Address::generate(&env);
+
+        // Schedule
+        client.emergency_withdraw(&token, &to, &500);
+
+        // Cancel
+        client.cancel_emergency_withdraw(&token);
+
+        // Advance time and try to execute — should schedule a new withdrawal
+        env.ledger().set_timestamp(1_000_000 + 24 * 60 * 60 + 1);
+        client.emergency_withdraw(&token, &to, &500);
+
+        // The new withdrawal should be pending (not yet transferred)
+        let tc = token::Client::new(&env, &token);
+        assert_eq!(tc.balance(&to), 0);
+    }
+
+    #[test]
+    fn test_emergency_withdraw_rejects_mismatched_params() {
+        let (env, admin, _oracle, token) = setup();
+        let client = initialize(&env, &admin);
+
+        let to = Address::generate(&env);
+        client.emergency_withdraw(&token, &to, &500);
+
+        // Try with different amount
+        let res = client.try_emergency_withdraw(&token, &to, &600);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::MismatchPendingData),
+            _ => panic!("expected MismatchPendingData"),
+        }
+    }
+
+    // ── recover_token ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_recover_token_untracked_succeeds() {
+        let (env, admin, _oracle, _token) = setup();
+        let client = initialize(&env, &admin);
+
+        // Create an untracked token (not registered in any match)
+        let untracked_token = env.register_stellar_asset_contract(admin.clone());
+        let untracked_addr = untracked_token.clone();
+        let tc = token::Client::new(&env, &untracked_addr);
+
+        // Send tokens directly to the contract
+        tc.mint(&env.current_contract_address(), &500);
+
+        let to = Address::generate(&env);
+        client.recover_token(&untracked_addr, &to, &500);
+        assert_eq!(tc.balance(&to), 500);
+    }
+
+    #[test]
+    fn test_recover_token_tracked_fails() {
+        let (env, admin, oracle, token) = setup();
+        let client = initialize(&env, &admin);
+
+        // Register a match with this token, making it tracked
+        client.register_match(&50u64, &oracle, &token, &deadline_in(&env, 3_600));
+
+        let to = Address::generate(&env);
+        let res = client.try_recover_token(&token, &to, &100);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::TokenIsTracked),
+            _ => panic!("expected TokenIsTracked"),
+        }
+    }
+
+    // ── set_admin ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_admin_schedule_and_execute() {
+        let (env, admin, _oracle, _token) = setup();
+        let client = initialize(&env, &admin);
+
+        let new_admin = Address::generate(&env);
+
+        // Schedule
+        client.set_admin(&new_admin);
+
+        // Execute too early — should fail
+        env.ledger().set_timestamp(1_000_000 + 48 * 60 * 60 - 1);
+        let res = client.try_set_admin(&new_admin);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::TimelockNotExpired),
+            _ => panic!("expected TimelockNotExpired"),
+        }
+
+        // Execute after timelock — should succeed
+        env.ledger().set_timestamp(1_000_000 + 48 * 60 * 60);
+        client.set_admin(&new_admin);
+
+        // Verify new admin can call admin-only functions
+        new_admin.require_auth();
+        client.cancel_emergency_withdraw(&_token);
+    }
+
+    #[test]
+    fn test_set_admin_cancel() {
+        let (env, admin, _oracle, _token) = setup();
+        let client = initialize(&env, &admin);
+
+        let new_admin = Address::generate(&env);
+
+        // Schedule
+        client.set_admin(&new_admin);
+
+        // Cancel
+        client.cancel_set_admin();
+
+        // Advance time — executing should start a new pending transfer
+        env.ledger().set_timestamp(1_000_000 + 48 * 60 * 60 + 1);
+        client.set_admin(&new_admin);
+
+        // Old admin should still be admin (new transfer is pending)
+        admin.require_auth();
+        client.cancel_set_admin();
+    }
+
+    #[test]
+    fn test_set_admin_rejects_mismatched_address() {
+        let (env, admin, _oracle, _token) = setup();
+        let client = initialize(&env, &admin);
+
+        let new_admin_a = Address::generate(&env);
+        let new_admin_b = Address::generate(&env);
+
+        client.set_admin(&new_admin_a);
+
+        // Try to confirm with a different address
+        let res = client.try_set_admin(&new_admin_b);
+        match res {
+            Err(Ok(e)) => assert_eq!(e, PlatformError::MismatchPendingData),
+            _ => panic!("expected MismatchPendingData"),
+        }
     }
 }
 
