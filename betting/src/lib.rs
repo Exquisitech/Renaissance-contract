@@ -134,6 +134,7 @@ pub enum DataKey {
     Match(u64),
     Stats(u64),
     Bet(u64, Address),
+    ProtocolFee,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -163,6 +164,23 @@ impl RenaissanceBettingContract {
     }
 
     // ── Admin / setup ─────────────────────────────────────────────────────────
+
+    /// Update the protocol fee (in basis points). Max 5% (500 bps). Admin only.
+    pub fn set_protocol_fee(env: Env, fee_bps: u32) -> Result<(), PlatformError> {
+        let admin = Self::require_admin(&env)?;
+        admin.require_auth();
+
+        if fee_bps > 500 {
+            return Err(PlatformError::InvalidFee);
+        }
+
+        env.storage().instance().set(&DataKey::ProtocolFee, &fee_bps);
+        env.events().publish(
+            (Symbol::new(&env, "ProtocolFeeUpdated"), admin),
+            fee_bps,
+        );
+        Ok(())
+    }
 
     /// One-time bootstrap of the contract admin. Subsequent calls fail with
     /// `PlatformError::Unauthorized` to guarantee a stable admin identity.
@@ -386,13 +404,34 @@ impl RenaissanceBettingContract {
         if balance < amount {
             return Err(PlatformError::InsufficientBalance);
         }
-        token_client.transfer(&user, &env.current_contract_address(), &amount);
+
+        let fee_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProtocolFee)
+            .unwrap_or(0);
+        let fee = if fee_bps > 0 {
+            amount.checked_mul(fee_bps as i128).ok_or(PlatformError::Overflow)? / 10000
+        } else {
+            0
+        };
+        let net_amount = amount.checked_sub(fee).ok_or(PlatformError::Overflow)?;
+
+        if fee > 0 {
+            let treasury_admin: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::TreasuryAdmin)
+                .ok_or(PlatformError::InternalError)?;
+            token_client.transfer(&user, &treasury_admin, &fee);
+        }
+        token_client.transfer(&user, &env.current_contract_address(), &net_amount);
 
         let bet = Bet {
             user: user.clone(),
             match_id,
             outcome,
-            amount,
+            amount: net_amount,
             token: m.token.clone(),
             claimed: false,
             payout: 0,
@@ -412,7 +451,7 @@ impl RenaissanceBettingContract {
         let prev = stats.pools.get(idx).unwrap_or(0);
         stats
             .pools
-            .set(idx, prev.checked_add(amount).ok_or(PlatformError::Overflow)?);
+            .set(idx, prev.checked_add(net_amount).ok_or(PlatformError::Overflow)?);
         env.storage()
             .instance()
             .set(&DataKey::Stats(match_id), &stats);
@@ -1288,5 +1327,57 @@ mod gas_bench {
 
         assert!(cpu <= GET_MATCH_CPU_BUDGET, "get_match cpu {cpu} exceeded budget {GET_MATCH_CPU_BUDGET}");
         assert!(mem <= GET_MATCH_MEM_BUDGET, "get_match mem {mem} exceeded budget {GET_MATCH_MEM_BUDGET}");
+    }
+    #[test]
+    fn test_set_protocol_fee_success() {
+        let (env, admin, _oracle, _token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        client.set_protocol_fee(&500);
+        // We can't directly check the internal state easily, but we can verify it doesn't fail
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Contract, #8)")] // InvalidFee
+    fn test_set_protocol_fee_invalid() {
+        let (env, admin, _oracle, _token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        
+        // Mock auth for admin
+        env.mock_all_auths();
+        client.set_protocol_fee(&501);
+    }
+
+    #[test]
+    fn test_fee_deduction() {
+        let (env, admin, oracle, token) = setup();
+        let contract_id = env.register_contract(None, RenaissanceBettingContract);
+        let client = RenaissanceBettingContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+        
+        let match_id = 7u64;
+        client.register_match(&match_id, &oracle, &token, &(env.ledger().timestamp() + 3_600));
+        
+        env.mock_all_auths();
+        client.set_protocol_fee(&500); // 5% fee
+
+        let user = Address::generate(&env);
+        mint(&env, &token, &user, 1_000);
+
+        let token_client = token::StellarAssetClient::new(&env, &token);
+        let initial_treasury = token_client.balance(&admin);
+
+        client.place_bet(&user, &match_id, &Outcome::HomeWin, &100i128);
+        
+        // Fee should be 5, net amount 95
+        let bet = client.get_bet(&user, &match_id).unwrap();
+        assert_eq!(bet.amount, 95);
+        
+        let treasury_balance = token_client.balance(&admin);
+        assert_eq!(treasury_balance, initial_treasury + 5); // Fee went to treasury admin
     }
 }
