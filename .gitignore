@@ -9,3 +9,5 @@
 # Optional IDE/editor files
 *.log
 *.tmp
+config.bat
+node_modules

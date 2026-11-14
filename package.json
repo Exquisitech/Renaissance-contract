@@ -1,6 +1,10 @@
 {
   "name": "renaissance-contracts",
   "private": true,
+  "dependencies": {
+    "dotenv": "^8.2.0",
+    "node-fetch": "^3.3.2"
+  },
   "scripts": {
     "generate:contracts": "node scripts/generate-contract-bindings.mjs",
     "typecheck:contracts": "node scripts/typecheck-contract-bindings.mjs"
